@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login HUD — shutdown dry run</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: Ubuntu, "Noto Sans", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    width: 1600px;
+    height: 1000px;
+    overflow: hidden;
+    color: #edf8ff;
+    background:
+      radial-gradient(circle at 22% 27%, rgba(46, 133, 164, .34), transparent 31%),
+      radial-gradient(circle at 82% 72%, rgba(124, 45, 107, .26), transparent 34%),
+      linear-gradient(135deg, #263746 0%, #121a25 50%, #281d30 100%);
+  }
+  .desktop-lines {
+    position: absolute;
+    inset: 0;
+    opacity: .32;
+    background-image:
+      linear-gradient(rgba(117, 212, 221, .06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(117, 212, 221, .06) 1px, transparent 1px);
+    background-size: 64px 64px;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(4, 8, 15, .67);
+  }
+  .dry-run {
+    position: absolute;
+    top: 26px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 7px 15px;
+    border: 1px solid rgba(255, 202, 103, .55);
+    border-radius: 999px;
+    color: #ffd78a;
+    background: rgba(31, 24, 15, .88);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: .09em;
+  }
+  .panel {
+    width: 650px;
+    padding: 28px 34px 24px;
+    border: 1px solid rgba(70, 239, 226, .38);
+    border-radius: 10px;
+    background: rgba(10, 17, 29, .96);
+    box-shadow: 0 0 42px rgba(0, 238, 220, .14), 0 26px 90px rgba(0, 0, 0, .56);
+  }
+  .kicker {
+    color: #54e4d6;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: .12em;
+  }
+  h1 {
+    margin: 7px 0 2px;
+    color: #fff;
+    font-size: 29px;
+    line-height: 1.15;
+  }
+  .elapsed { color: #94a9bb; font-size: 13px; }
+  .overall { margin-top: 14px; color: #b8f8f1; font-size: 16px; }
+  .progress-label { margin-top: 10px; color: #8ca9bb; font-size: 12px; }
+  .track {
+    height: 7px;
+    margin: 6px 4px 12px;
+    overflow: hidden;
+    border-radius: 4px;
+    background: rgba(126, 164, 188, .25);
+  }
+  .fill {
+    width: 39%;
+    height: 100%;
+    border-radius: inherit;
+    background: #6bf2e2;
+    box-shadow: 0 0 8px rgba(91, 242, 226, .72);
+  }
+  .rows { display: grid; gap: 7px; }
+  .row {
+    padding: 8px 11px 7px;
+    border: 1px solid rgba(127, 158, 183, .19);
+    border-radius: 6px;
+    background: rgba(70, 93, 115, .13);
+  }
+  .heading {
+    display: grid;
+    grid-template-columns: 12px 18px 1fr auto;
+    gap: 7px;
+    align-items: center;
+    margin: -2px -3px;
+    padding: 2px 3px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .heading:hover, .heading:focus {
+    outline: none;
+    background: rgba(72, 223, 209, .09);
+    box-shadow: 0 0 0 1px rgba(72, 223, 209, .24);
+  }
+  .expander { color: #7893a5; font-size: 12px; text-align: center; }
+  .icon { color: #72e8dc; font-size: 15px; text-align: center; }
+  .name { color: #e6f1f7; font-size: 14px; font-weight: 700; }
+  .state { color: #9db5c5; font-size: 13px; }
+  .message { margin: 3px 0 0 26px; color: #a9bdcb; font-size: 12px; }
+  .expanded {
+    border-color: rgba(84, 228, 214, .34);
+    background: rgba(33, 79, 92, .18);
+  }
+  .details {
+    margin: 9px 2px 1px 18px;
+    padding: 8px 10px;
+    border-left: 1px solid rgba(72, 223, 209, .38);
+    border-radius: 4px;
+    background: rgba(2, 8, 15, .45);
+  }
+  .detail-title {
+    margin: 2px 0 5px;
+    color: #5bded2;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .1em;
+  }
+  .substep {
+    display: grid;
+    grid-template-columns: 14px 1fr auto;
+    gap: 6px;
+    margin: 4px 0;
+    color: #dcebf2;
+    font-size: 11px;
+  }
+  .substep span:last-child { color: #8eabbc; }
+  .log-line {
+    margin: 3px 0;
+    color: #8da7b7;
+    font: 10px monospace;
+  }
+  .details[hidden] { display: none; }
+  .ready .icon { color: #62eeac; }
+  .running {
+    border-color: rgba(84, 228, 214, .43);
+    background: rgba(42, 113, 121, .16);
+  }
+  .running .icon { animation: pulse 1.2s infinite ease-in-out; }
+  .mini-track {
+    height: 5px;
+    margin: 6px 4px 0 26px;
+    overflow: hidden;
+    border-radius: 3px;
+    background: rgba(126, 164, 188, .25);
+  }
+  .mini-fill { width: 46%; height: 100%; background: #48dfd1; box-shadow: 0 0 7px rgba(72,223,209,.65); }
+  .actions { display: flex; justify-content: flex-end; align-items: center; gap: 15px; margin-top: 17px; }
+  .esc { color: #839aa9; font-size: 12px; }
+  button {
+    min-width: 172px;
+    padding: 10px 16px;
+    border: 1px solid rgba(255, 151, 91, .78);
+    border-radius: 5px;
+    color: #ecfcff;
+    background: rgba(150, 63, 42, .72);
+    font: 700 14px Ubuntu, sans-serif;
+  }
+  @keyframes pulse { 50% { opacity: .35; } }
+</style>
+</head>
+<body>
+  <div class="desktop-lines"></div>
+  <main class="overlay">
+    <div class="dry-run">DRY RUN · NO SYSTEM ACTIONS</div>
+    <section class="panel" role="dialog" aria-label="Shutdown monitor preview">
+      <div class="kicker">SYSTEM / SHUTDOWN TELEMETRY</div>
+      <h1>Deinitializing system</h1>
+      <div class="elapsed">Elapsed 8s</div>
+      <div class="overall">System shutdown: Closing session systems safely</div>
+      <div class="progress-label">Overall progress 39%</div>
+      <div class="track"><div class="fill"></div></div>
+      <div class="rows">
+        <div class="row ready"><div class="heading"><span class="icon">✓</span><span class="name">GNOME shutdown request</span><span class="state">Ready</span></div><div class="message">GNOME requested a clean session shutdown</div></div>
+        <div class="row ready"><div class="heading"><span class="icon">✓</span><span class="name">tmux-resurrect checkpoint</span><span class="state">Ready</span></div><div class="message">Completed tmux-resurrect save</div></div>
+        <div class="row ready"><div class="heading"><span class="icon">✓</span><span class="name">Desktop and browser checkpoint</span><span class="state">Ready</span></div><div class="message">Completed workspace save</div></div>
+        <div class="row running expanded"><div class="heading"><span class="icon">◉</span><span class="name">Cloud-drive deinitialization</span><span class="state">Running</span></div><div class="message">Stopping metadata workers before safely unmounting drives</div><div class="mini-track"><div class="mini-fill"></div></div><div class="details"><div class="detail-title">INTERNAL STEPS</div><div class="substep"><span>◉</span><strong>Metadata workers</strong><span>Running</span></div><div class="substep"><span>›</span><strong>Google Drive</strong><span>Pending</span></div><div class="substep"><span>›</span><strong>Nextcloud drive</strong><span>Pending</span></div><div class="substep"><span>›</span><strong>Proton Drive</strong><span>Pending</span></div><div class="detail-title">ACTIVITY LOG</div><div class="log-line">21:42:07 · Cloud drives · running · Deinitialization started</div><div class="log-line">21:42:08 · Metadata workers · running · Stopping timer and workers</div></div></div>
+        <div class="row"><div class="heading"><span class="icon">›</span><span class="name">Cancellation recovery</span><span class="state">Pending</span></div><div class="message">Pending</div></div>
+        <div class="row"><div class="heading"><span class="icon">›</span><span class="name">GNOME shutdown handoff</span><span class="state">Pending</span></div><div class="message">Pending</div></div>
+      </div>
+      <div class="actions"><span class="esc">Esc also cancels safely</span><button type="button">Cancel shutdown</button></div>
+    </section>
+  </main>
+  <script>
+    function addGeneratedActivity(row, index) {
+      if (row.querySelector('.details')) return;
+      const name = row.querySelector('.name').textContent;
+      const state = row.querySelector('.state').textContent.toLowerCase();
+      const message = row.querySelector('.message')?.textContent || 'No message';
+      const details = document.createElement('div');
+      details.className = 'details';
+      const title = document.createElement('div');
+      title.className = 'detail-title';
+      title.textContent = 'ACTIVITY LOG';
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.textContent = `08:14:${String(10 + index).padStart(2, '0')} · ${name} · ${state} · ${message}`;
+      details.append(title, line);
+      row.append(details);
+    }
+
+    function makeRowsInteractive() {
+      document.querySelectorAll('.row').forEach((row, index) => {
+        addGeneratedActivity(row, index);
+        const heading = row.querySelector('.heading');
+        const expander = document.createElement('span');
+        expander.className = 'expander';
+        heading.prepend(expander);
+        heading.tabIndex = 0;
+        heading.setAttribute('role', 'button');
+        const details = row.querySelector('.details');
+        const setExpanded = expanded => {
+          row.classList.toggle('expanded', expanded);
+          details.hidden = !expanded;
+          expander.textContent = expanded ? '⌄' : '›';
+          heading.setAttribute('aria-expanded', String(expanded));
+        };
+        setExpanded(row.classList.contains('expanded'));
+        heading.addEventListener('click', () => setExpanded(details.hidden));
+        heading.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            setExpanded(details.hidden);
+          }
+        });
+      });
+    }
+
+    function closeDemo() {
+      window.close();
+      window.setTimeout(() => {
+        document.querySelector('.panel').hidden = true;
+        document.querySelector('.dry-run').textContent = 'DEMO CLOSED · NO SYSTEM ACTIONS WERE RUN';
+      }, 100);
+    }
+
+    function finishStartupDemo() {
+      document.querySelectorAll('.row').forEach((row, index) => {
+        row.classList.remove('running', 'pending');
+        row.classList.add('ready');
+        row.querySelector('.icon').textContent = '✓';
+        row.querySelector('.state').textContent = 'Ready';
+        row.querySelector('.mini-track')?.remove();
+        const log = document.createElement('div');
+        log.className = 'log-line';
+        log.textContent = `08:15:${String(10 + index).padStart(2, '0')} · ${row.querySelector('.name').textContent} · ready · Generated step completed`;
+        row.querySelector('.details').append(log);
+      });
+      document.querySelector('.overall').textContent = 'Workspace initialization complete';
+      document.querySelector('.progress-label').textContent = 'Overall progress 100%';
+      document.querySelector('.fill').style.width = '100%';
+      document.querySelector('.actions').innerHTML = '<span class="esc">All generated jobs completed successfully</span><button id="demo-ok" type="button">OK</button>';
+      document.querySelector('#demo-ok').addEventListener('click', closeDemo);
+    }
+
+    if (new URLSearchParams(location.search).get('mode') === 'startup') {
+      document.title = 'Login HUD — startup dry run';
+      document.querySelector('.dry-run').textContent = 'LOGIN HUD DRY RUN · NO SYSTEM ACTIONS';
+      document.querySelector('.kicker').textContent = 'SESSION / STARTUP TELEMETRY';
+      document.querySelector('h1').textContent = 'Restoring workspace';
+      document.querySelector('.elapsed').textContent = 'Elapsed 14s';
+      document.querySelector('.overall').textContent = 'Restoring desktop applications and conversations';
+      document.querySelector('.progress-label').textContent = 'Overall progress 55%';
+      document.querySelector('.fill').style.width = '55%';
+
+      const stages = [
+        ['ready', 'GNOME Wayland session', 'Ready', 'Wayland session is active (wayland-0)'],
+        ['ready', 'NVIDIA display handoff', 'Ready', 'Displays and workspace topology are stable'],
+        ['ready', 'tmux-resurrect', 'Ready', 'Canonical tmux state restored'],
+        ['ready', 'Alacritty and tmux sessions', 'Ready', 'Four terminal windows verified'],
+        ['running', 'Codex conversations', 'Running', 'Reconnecting saved conversation panes'],
+        ['running', 'Chrome workspaces', 'Running', 'Placing restored browser windows'],
+        ['pending', 'Workspace restoration', 'Pending', 'Waiting for application placement'],
+      ];
+      const icons = {ready: '✓', running: '◉', pending: '›'};
+      document.querySelector('.rows').innerHTML = stages.map(([kind, name, state, message]) => `
+        <div class="row ${kind}">
+          <div class="heading"><span class="icon">${icons[kind]}</span><span class="name">${name}</span><span class="state">${state}</span></div>
+          <div class="message">${message}</div>
+          ${kind === 'running' ? '<div class="mini-track"><div class="mini-fill"></div></div>' : ''}
+        </div>`).join('') + `
+        <div class="row running expanded">
+          <div class="heading"><span class="icon">◉</span><span class="name">Cloud drives and metadata</span><span class="state">Running</span></div>
+          <div class="message">Mounting drives and warming their metadata as one job</div>
+          <div class="mini-track"><div class="mini-fill" style="width: 61%"></div></div>
+          <div class="details">
+            <div class="detail-title">INTERNAL STEPS</div>
+            <div class="substep"><span>✓</span><strong>Google Drive</strong><span>Ready</span></div>
+            <div class="substep"><span>✓</span><strong>Nextcloud drive</strong><span>Ready</span></div>
+            <div class="substep"><span>◉</span><strong>Proton Drive</strong><span>Running</span></div>
+            <div class="substep"><span>›</span><strong>Metadata warm-up</strong><span>Pending</span></div>
+            <div class="detail-title">ACTIVITY LOG</div>
+            <div class="log-line">08:14:27 · Google Drive · ready · Mount verified</div>
+            <div class="log-line">08:14:29 · Nextcloud drive · ready · Mount verified</div>
+            <div class="log-line">08:14:31 · Proton Drive · running · Waiting for mount visibility</div>
+          </div>
+        </div>`;
+      document.querySelector('.actions').innerHTML = '<span class="esc">Demo control · no commands are executed</span><button id="demo-finish" type="button">Finish sample run</button>';
+      document.querySelector('#demo-finish').addEventListener('click', finishStartupDemo);
+    } else {
+      document.querySelector('.actions button').addEventListener('click', closeDemo);
+    }
+    makeRowsInteractive();
+  </script>
+</body>
+</html>
