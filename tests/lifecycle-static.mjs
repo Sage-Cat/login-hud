@@ -82,8 +82,18 @@ assert.match(
 );
 assert.match(
     source,
-    /_interceptEndSessionConfirm\(signal\)[\s\S]*?this\._writeProtocolFile\(this\._requestFile[\s\S]*?this\._endSessionDialog\.close\(true\);/,
-    'the request must be durable before the native dialog is released'
+    /_interceptEndSessionConfirm\(signal\)[\s\S]*?await this\._closeNativeDialogBeforePreflight\(\);[\s\S]*?this\._writeProtocolFile\(this\._requestFile/,
+    'the native confirmation must be fully closed before the HUD request is published'
+);
+assert.match(
+    source,
+    /_closeNativeDialogBeforePreflight\(\)[\s\S]*?dialog\.state === ModalDialogState\.CLOSED[\s\S]*?dialog\.connect\('closed'/,
+    'the timer path must wait for GNOME confirmation closure'
+);
+assert.match(
+    source,
+    /if \(this\._nativeHandoffOperationId\)\s*return this\._originalEndSessionConfirm/,
+    'a later Power Off Anyway confirmation must continue the prepared action without another preflight'
 );
 assert.match(
     source,
@@ -107,18 +117,52 @@ assert.match(
 );
 assert.match(
     source,
-    /prepared\.operation_id !== status\.operationId \|\|\s*prepared\.session_id !== status\.sessionId[\s\S]*?this\._handoffToGnome\(status\)/,
-    'GNOME handoff must require a matching prepared marker'
+    /prepared\.operation_id !== status\.operationId \|\|\s*prepared\.session_id !== status\.sessionId \|\|\s*prepared\.action !== status\.shutdownAction[\s\S]*?this\._handoffToGnome\(status\)/,
+    'GNOME handoff must require a marker matching operation, session, and action'
+);
+assert.match(
+    source,
+    /_startPreparedPolling\(operationId\)[\s\S]*?GLib\.timeout_add\([\s\S]*?this\._checkPreparedHandoff\(\)/,
+    'prepared-marker handoff must be polled as well as watched for file events'
+);
+assert.match(
+    source,
+    /const PREPARED_POLL_TIMEOUT_MS = 15000;[\s\S]*?elapsedMs >= PREPARED_POLL_TIMEOUT_MS[\s\S]*?this\._requestCancel\(status\)/,
+    'prepared polling must cancel safely instead of holding the modal forever'
+);
+assert.match(
+    source,
+    /const cancelled = status\?\.operationId === operationId &&\s*this\._requestCancel\(status\);\s*if \(cancelled\) \{\s*this\._dismissed = true;/,
+    'a failed cancel write must not hide an operation which remains pending'
+);
+assert.match(
+    source,
+    /_handleNativeHandoffFailure\(status, error\)[\s\S]*?this\._nativeHandoffOperationId = null;[\s\S]*?this\._writeProtocolFile\(this\._cancelFile[\s\S]*?this\._cancelNativeEndSessionOnce\(status\.operationId\)/,
+    'a rejected GNOME handoff must clear bypass state and cancel the exact operation'
+);
+assert.match(
+    source,
+    /_handleNativeHandoffFailure\(status, error\)[\s\S]*?this\._preflightOperationId = null;[\s\S]*?this\._preflightAction = null;[\s\S]*?this\._preflightSignal = null;/,
+    'a rejected GNOME handoff must not block future confirmed shutdowns'
+);
+assert.match(
+    source,
+    /const wasHandedOff = this\._nativeHandoffOperationId === status\.operationId;[\s\S]*?this\._nativeCancelledOperationId = status\.operationId;[\s\S]*?this\._nativeHandoffOperationId = null;/,
+    'repeated terminal status after GNOME cancellation must not emit Canceled twice'
 );
 assert.match(
     source,
     /Gio\.FileQueryInfoFlags\.NOFOLLOW_SYMLINKS[\s\S]*?info\.get_file_type\(\) !== Gio\.FileType\.REGULAR/,
     'a symlink or non-regular prepared marker must never authorize handoff'
 );
+assert.ok(
+    source.includes("const SHUTDOWN_ORIGINS = new Set(['preflight']);"),
+    'backend-only GNOME shutdown status must not be displayable'
+);
 assert.match(
     source,
-    /if \(status\.shutdownOrigin === 'preflight'\) \{[\s\S]*?this\._checkPreparedHandoff\(\);\s*\} else \{\s*this\._hud\.setHandoffStarted/,
-    'a gnome-origin request must never invoke the deferred original action'
+    /parsed\.mode === 'shutdown' &&\s*!matchesRequest && !matchesLocalPreflight[\s\S]*?this\._lastGoodStatus = null;/,
+    'shutdown HUD visibility must be bound to the post-confirmation private request'
 );
 assert.match(
     source,
