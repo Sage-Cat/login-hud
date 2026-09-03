@@ -82,7 +82,7 @@
     background: rgba(126, 164, 188, .25);
   }
   .fill {
-    width: 39%;
+    width: 50%;
     height: 100%;
     border-radius: inherit;
     background: #6bf2e2;
@@ -182,18 +182,15 @@
     <div class="dry-run">DRY RUN · NO SYSTEM ACTIONS</div>
     <section class="panel" role="dialog" aria-label="Shutdown monitor preview">
       <div class="kicker">SYSTEM / SHUTDOWN TELEMETRY</div>
-      <h1>Deinitializing system</h1>
+      <h1>Saving workspace</h1>
       <div class="elapsed">Elapsed 8s</div>
-      <div class="overall">System shutdown: Closing session systems safely</div>
-      <div class="progress-label">Overall progress 39%</div>
+      <div class="overall">Power off confirmed: Capturing recoverable session state</div>
+      <div class="progress-label">Overall progress 50%</div>
       <div class="track"><div class="fill"></div></div>
       <div class="rows">
-        <div class="row ready"><div class="heading"><span class="icon">✓</span><span class="name">GNOME shutdown request</span><span class="state">Ready</span></div><div class="message">GNOME requested a clean session shutdown</div></div>
         <div class="row ready"><div class="heading"><span class="icon">✓</span><span class="name">tmux-resurrect checkpoint</span><span class="state">Ready</span></div><div class="message">Completed tmux-resurrect save</div></div>
-        <div class="row ready"><div class="heading"><span class="icon">✓</span><span class="name">Desktop and browser checkpoint</span><span class="state">Ready</span></div><div class="message">Completed workspace save</div></div>
-        <div class="row running expanded"><div class="heading"><span class="icon">◉</span><span class="name">Cloud-drive deinitialization</span><span class="state">Running</span></div><div class="message">Stopping metadata workers before safely unmounting drives</div><div class="mini-track"><div class="mini-fill"></div></div><div class="details"><div class="detail-title">INTERNAL STEPS</div><div class="substep"><span>◉</span><strong>Metadata workers</strong><span>Running</span></div><div class="substep"><span>›</span><strong>Google Drive</strong><span>Pending</span></div><div class="substep"><span>›</span><strong>Nextcloud drive</strong><span>Pending</span></div><div class="substep"><span>›</span><strong>Proton Drive</strong><span>Pending</span></div><div class="detail-title">ACTIVITY LOG</div><div class="log-line">21:42:07 · Cloud drives · running · Deinitialization started</div><div class="log-line">21:42:08 · Metadata workers · running · Stopping timer and workers</div></div></div>
-        <div class="row"><div class="heading"><span class="icon">›</span><span class="name">Cancellation recovery</span><span class="state">Pending</span></div><div class="message">Pending</div></div>
-        <div class="row"><div class="heading"><span class="icon">›</span><span class="name">GNOME shutdown handoff</span><span class="state">Pending</span></div><div class="message">Pending</div></div>
+        <div class="row running expanded"><div class="heading"><span class="icon">◉</span><span class="name">Desktop and browser checkpoint</span><span class="state">Running</span></div><div class="message">Capturing Alacritty and Chrome workspace state</div><div class="mini-track"><div class="mini-fill"></div></div><div class="details"><div class="detail-title">ACTIVITY LOG</div><div class="log-line">21:42:07 · Desktop and browser checkpoint · running · Reading live window placement</div><div class="log-line">21:42:08 · Desktop and browser checkpoint · running · Saving Chrome window fingerprints</div></div></div>
+        <div class="row"><div class="heading"><span class="icon">›</span><span class="name">Checkpoint integrity</span><span class="state">Pending</span></div><div class="message">Waiting for the managed save worker</div></div>
       </div>
       <div class="actions"><span class="esc">Esc also cancels safely</span><button type="button">Cancel shutdown</button></div>
     </section>
