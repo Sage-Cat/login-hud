@@ -1,6 +1,6 @@
 # Verification record
 
-Last checked: `2026-09-03T22:03:10+03:00` on GNOME Shell 46.0, native
+Last checked: `2026-09-04T01:36:16+03:00` on GNOME Shell 46.0, native
 Wayland.
 
 ## Confirmed
@@ -14,10 +14,21 @@ Wayland.
   byte-identical to the tracked source.
 - `login-hud-v2@sagecat.local` is present in GNOME's `enabled-extensions`
   setting.
-- The shutdown path retains GNOME's original confirmation, requires a rendered
-  HUD acknowledgement and visible countdown, and releases the retained action
-  only after a matching prepared marker. Cancellation is operation-bound and
-  emitted at most once.
+- The initial GNOME `QueryEndSession` is passive. A shutdown request is created
+  only from the final native `_confirm` callback and only after that dialog is
+  fully closed.
+- Shutdown work contains only tmux, desktop/browser, and integrity checkpoints.
+  It has no cloud-drive, mount, warm-up, or GNOME deinitialization commands.
+- The shutdown path requires a rendered HUD acknowledgement, visible countdown,
+  and a prepared marker matching the operation, session, and action. Prepared
+  polling is bounded, and cancellation is operation-bound and emitted at most
+  once across repeated status updates.
+- The complete workspace test target passes: 140 Python tests, the Chrome
+  extension protocol checks, 14 gnome-winctl Python tests, 31 gnome-winctl Node
+  tests, and the Login HUD static checks.
+- The live coordinator is active, all three cloud-drive services remain active
+  and mounted, and the current startup status is ready with
+  `show_startup_hud: false`.
 
 ## Activation boundary
 
