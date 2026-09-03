@@ -1,0 +1,290 @@
+.login-hud-overlay {
+    background-color: rgba(4, 8, 15, 0.32);
+}
+
+.login-hud-panel {
+    width: 650px;
+    max-width: 650px;
+    padding: 30px 34px 26px;
+    spacing: 10px;
+    border: 1px solid rgba(70, 239, 226, 0.38);
+    border-radius: 10px;
+    background-color: rgba(10, 17, 29, 0.94);
+    box-shadow: 0 0 32px rgba(0, 238, 220, 0.12);
+    color: #edf8ff;
+}
+
+.login-hud-kicker {
+    color: #54e4d6;
+    font-size: 10pt;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+}
+
+.login-hud-title {
+    color: #ffffff;
+    font-size: 22pt;
+    font-weight: 700;
+}
+
+.login-hud-elapsed {
+    color: #94a9bb;
+    font-size: 10pt;
+}
+
+.login-hud-overall {
+    margin-top: 5px;
+    color: #b8f8f1;
+    font-size: 12pt;
+}
+
+.login-hud-overall-progress-label {
+    margin-top: 4px;
+    color: #8ca9bb;
+    font-size: 9pt;
+}
+
+.login-hud-overall-progress-track {
+    margin: 0 4px 4px;
+    height: 7px;
+    border-radius: 4px;
+    background-color: rgba(126, 164, 188, 0.25);
+}
+
+.login-hud-overall-progress-fill {
+    height: 7px;
+    border-radius: 4px;
+    background-color: #6bf2e2;
+    box-shadow: 0 0 8px rgba(91, 242, 226, 0.72);
+}
+
+.login-hud-notice {
+    margin-top: 4px;
+    padding: 8px 10px;
+    border-radius: 5px;
+    background-color: rgba(255, 184, 73, 0.14);
+    color: #ffd28a;
+    font-size: 10pt;
+}
+
+.login-hud-rows-scroll {
+    max-height: 520px;
+    margin-top: 8px;
+}
+
+.login-hud-rows {
+    spacing: 8px;
+    padding-right: 5px;
+}
+
+.login-hud-row {
+    padding: 10px 12px 9px;
+    spacing: 5px;
+    border: 1px solid rgba(127, 158, 183, 0.19);
+    border-radius: 6px;
+    background-color: rgba(70, 93, 115, 0.13);
+}
+
+.login-hud-row-heading {
+    spacing: 8px;
+}
+
+.login-hud-row-heading-button {
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+.login-hud-row-heading-button:hover,
+.login-hud-row-heading-button:focus {
+    background-color: rgba(72, 223, 209, 0.09);
+    box-shadow: 0 0 0 1px rgba(72, 223, 209, 0.24);
+}
+
+.login-hud-row-expander {
+    width: 12px;
+    height: 12px;
+    color: #7893a5;
+}
+
+.login-hud-row-icon {
+    icon-size: 16px;
+    color: #72e8dc;
+}
+
+.login-hud-row-name {
+    color: #e6f1f7;
+    font-size: 11pt;
+    font-weight: 700;
+}
+
+.login-hud-row-state {
+    color: #9db5c5;
+    font-size: 10pt;
+}
+
+.login-hud-row-message {
+    margin-left: 44px;
+    color: #a9bdcb;
+    font-size: 10pt;
+}
+
+.login-hud-progress-track {
+    margin: 4px 4px 0 44px;
+    min-width: 510px;
+    height: 5px;
+    border-radius: 3px;
+    background-color: rgba(126, 164, 188, 0.25);
+}
+
+.login-hud-progress-fill {
+    height: 5px;
+    border-radius: 3px;
+    background-color: #48dfd1;
+    box-shadow: 0 0 7px rgba(72, 223, 209, 0.65);
+}
+
+.login-hud-indeterminate {
+    margin-left: 44px;
+    spacing: 6px;
+}
+
+.login-hud-spinner {
+    width: 14px;
+    height: 14px;
+    color: #48dfd1;
+}
+
+.login-hud-indeterminate-label,
+.login-hud-empty {
+    color: #7f99ab;
+    font-size: 9pt;
+}
+
+.login-hud-row-ready .login-hud-row-icon {
+    color: #62eeac;
+}
+
+.login-hud-row-degraded .login-hud-row-icon,
+.login-hud-row-degraded .login-hud-row-state {
+    color: #ffc45e;
+}
+
+.login-hud-row-failed {
+    border-color: rgba(255, 106, 120, 0.52);
+    background-color: rgba(181, 46, 61, 0.17);
+}
+
+.login-hud-row-failed .login-hud-row-icon,
+.login-hud-row-failed .login-hud-row-state {
+    color: #ff8793;
+}
+
+.login-hud-row-skipped {
+    opacity: 0.68;
+}
+
+.login-hud-job-details {
+    margin: 7px 2px 1px 20px;
+    padding: 10px 12px;
+    spacing: 4px;
+    border-left: 1px solid rgba(72, 223, 209, 0.34);
+    border-radius: 4px;
+    background-color: rgba(2, 8, 15, 0.46);
+}
+
+.login-hud-detail-heading {
+    margin-top: 4px;
+    color: #5bded2;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+}
+
+.login-hud-substep {
+    margin-top: 3px;
+    spacing: 7px;
+}
+
+.login-hud-substep-icon {
+    color: #72e8dc;
+}
+
+.login-hud-substep-name {
+    color: #dcebf2;
+    font-size: 9pt;
+    font-weight: 700;
+}
+
+.login-hud-substep-state {
+    color: #8eabbc;
+    font-size: 8pt;
+}
+
+.login-hud-substep-message {
+    margin-left: 20px;
+    color: #819aaa;
+    font-size: 8pt;
+}
+
+.login-hud-log-line,
+.login-hud-log-empty {
+    color: #8da7b7;
+    font-family: monospace;
+    font-size: 8pt;
+}
+
+.login-hud-log-ready {
+    color: #77cfa4;
+}
+
+.login-hud-log-degraded {
+    color: #e5b85e;
+}
+
+.login-hud-log-failed {
+    color: #ff8793;
+}
+
+.login-hud-actions {
+    margin-top: 12px;
+    spacing: 8px;
+}
+
+.login-hud-action-status {
+    padding: 8px 4px;
+    color: #72e8dc;
+    font-weight: 700;
+}
+
+.login-hud-button {
+    min-width: 172px;
+    padding: 8px 14px;
+    border: 1px solid rgba(104, 202, 223, 0.48);
+    border-radius: 5px;
+    background-color: rgba(46, 91, 113, 0.52);
+    color: #ecfcff;
+    font-weight: 700;
+}
+
+.login-hud-button:hover,
+.login-hud-button:focus {
+    background-color: rgba(59, 142, 162, 0.72);
+}
+
+.login-hud-button-primary {
+    border-color: rgba(78, 238, 196, 0.72);
+    background-color: rgba(32, 137, 113, 0.68);
+}
+
+.login-hud-button-cancel {
+    border-color: rgba(255, 151, 91, 0.78);
+    background-color: rgba(150, 63, 42, 0.72);
+}
+
+.login-hud-button-cancel:hover,
+.login-hud-button-cancel:focus {
+    background-color: rgba(190, 77, 52, 0.88);
+}
