@@ -11,6 +11,7 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {Spinner} from 'resource:///org/gnome/shell/ui/animation.js';
+import {State as ModalDialogState} from 'resource:///org/gnome/shell/ui/modalDialog.js';
 
 const STATUS_DIRECTORY = 'workspace-state';
 const STATUS_FILENAME = 'login-hud-status.json';
@@ -29,9 +30,10 @@ const STATES = new Set([
 const TERMINAL_STATES = new Set(['ready', 'degraded', 'failed', 'skipped']);
 const MODES = new Set(['startup', 'shutdown']);
 const SHUTDOWN_ACTIONS = new Set(['poweroff', 'restart']);
-const SHUTDOWN_ORIGINS = new Set(['preflight', 'gnome']);
+const SHUTDOWN_ORIGINS = new Set(['preflight']);
 const SHUTDOWN_COUNTDOWN_SECONDS = 3;
 const PREFLIGHT_STATUS_TIMEOUT_MS = 15000;
+const PREPARED_POLL_TIMEOUT_MS = 15000;
 
 function text(value, fallback = '') {
     return typeof value === 'string' && value.length > 0 ? value : fallback;
@@ -139,11 +141,10 @@ function normaliseStatus(raw) {
     const shutdownAction = mode === 'shutdown' && SHUTDOWN_ACTIONS.has(raw.shutdown_action)
         ? raw.shutdown_action : null;
     const shutdownOrigin = mode === 'shutdown' && SHUTDOWN_ORIGINS.has(raw.shutdown_origin)
-        ? raw.shutdown_origin : mode === 'shutdown' ? 'gnome' : null;
-    if (mode === 'shutdown' && raw.shutdown_action !== undefined && !shutdownAction)
+        ? raw.shutdown_origin : null;
+    if (mode === 'shutdown' && !shutdownAction)
         throw new Error(`Unknown shutdown action: ${String(raw.shutdown_action)}.`);
-    if (mode === 'shutdown' && raw.shutdown_origin !== undefined &&
-        !SHUTDOWN_ORIGINS.has(raw.shutdown_origin))
+    if (mode === 'shutdown' && !SHUTDOWN_ORIGINS.has(raw.shutdown_origin))
         throw new Error(`Unknown shutdown origin: ${String(raw.shutdown_origin)}.`);
 
     const stages = raw.stages.slice(0, 64).map((item, index) => {
@@ -196,7 +197,7 @@ function normaliseStatus(raw) {
         updatedAt: text(raw.updated_at),
         overallState: raw.overall_state,
         overallMessage: text(raw.overall_message,
-            mode === 'shutdown' ? 'Deinitializing system…' : 'Preparing your session…'),
+            mode === 'shutdown' ? 'Saving your workspace…' : 'Preparing your session…'),
         errorLogPath: typeof raw.error_log_path === 'string' && raw.error_log_path.startsWith('/')
             ? raw.error_log_path : null,
         stages: jobs,
@@ -749,6 +750,7 @@ export default class LoginHudExtension extends Extension {
         this._renderAckWrittenOperationId = null;
         this._commitWrittenOperationId = null;
         this._preparedCheckPending = false;
+        this._preparedPollId = 0;
         this._nativeHandoffOperationId = null;
         this._preflightOperationId = null;
         this._preflightAction = null;
@@ -835,6 +837,7 @@ export default class LoginHudExtension extends Extension {
             GLib.Source.remove(this._sessionIdRetryId);
         if (this._preflightWatchdogId)
             GLib.Source.remove(this._preflightWatchdogId);
+        this._stopPreparedPolling();
         this._cancelShutdownCountdown();
         this._abortActivePreflightOnDisable();
         this._restoreEndSessionInterceptor();
@@ -894,6 +897,7 @@ export default class LoginHudExtension extends Extension {
         this._renderAckWrittenOperationId = null;
         this._commitWrittenOperationId = null;
         this._preparedCheckPending = false;
+        this._preparedPollId = 0;
         this._nativeHandoffOperationId = null;
         this._preflightOperationId = null;
         this._preflightAction = null;
@@ -1017,11 +1021,60 @@ export default class LoginHudExtension extends Extension {
         }
     }
 
+    _closeNativeDialogBeforePreflight() {
+        const dialog = this._endSessionDialog;
+        dialog._stopTimer?.();
+        dialog._stopAltCapture?.();
+        if (dialog.state === ModalDialogState.CLOSED)
+            return Promise.resolve();
+
+        return new Promise((resolve, reject) => {
+            let closedId = 0;
+            let timeoutId = 0;
+            let settled = false;
+            const finish = error => {
+                if (settled)
+                    return;
+                settled = true;
+                if (closedId) {
+                    dialog.disconnect(closedId);
+                    closedId = 0;
+                }
+                if (timeoutId) {
+                    GLib.Source.remove(timeoutId);
+                    timeoutId = 0;
+                }
+                if (error)
+                    reject(error);
+                else
+                    resolve();
+            };
+            closedId = dialog.connect('closed', () => finish());
+            timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
+                timeoutId = 0;
+                if (dialog.state === ModalDialogState.CLOSED)
+                    finish();
+                else
+                    finish(new Error('the native GNOME confirmation did not close'));
+                return GLib.SOURCE_REMOVE;
+            });
+            dialog.close(true);
+            if (dialog.state === ModalDialogState.CLOSED)
+                finish();
+        });
+    }
+
     async _interceptEndSessionConfirm(signal) {
         const action = signal === 'ConfirmedShutdown'
             ? 'poweroff'
             : signal === 'ConfirmedReboot' ? 'restart' : null;
         if (!action)
+            return this._originalEndSessionConfirm.call(this._endSessionDialog, signal);
+
+        // GNOME may show a second "Power Off Anyway" dialog after another
+        // application adds a JIT inhibitor. That confirmation continues the
+        // already prepared operation and must never start a second preflight.
+        if (this._nativeHandoffOperationId)
             return this._originalEndSessionConfirm.call(this._endSessionDialog, signal);
 
         if (this._preflightStarting ||
@@ -1034,6 +1087,11 @@ export default class LoginHudExtension extends Extension {
         try {
             if (!sessionId)
                 throw new Error('the current GNOME session could not be identified');
+            // The normal button path calls _confirm from the dialog's closed
+            // signal. The automatic timer calls it while the dialog is still
+            // open, so wait for that modal to be fully gone before publishing
+            // any request that can make the HUD visible.
+            await this._closeNativeDialogBeforePreflight();
             this._writeProtocolFile(this._requestFile, 'shutdown-request', {
                 schema_version: 1,
                 operation_id: operationId,
@@ -1050,13 +1108,6 @@ export default class LoginHudExtension extends Extension {
             this._renderAckWrittenOperationId = null;
             this._commitWrittenOperationId = null;
             this._cancelShutdownCountdown();
-
-            // Button activation already closes the dialog. The automatic
-            // GNOME timer calls _confirm() directly, so explicitly remove the
-            // old dialog in that path without emitting Confirmed* or Canceled.
-            this._endSessionDialog._stopTimer?.();
-            this._endSessionDialog._stopAltCapture?.();
-            this._endSessionDialog.close(true);
         } catch (error) {
             console.error(`Login HUD could not start shutdown preflight: ${error.message}`);
             if (this._preflightOperationId === operationId) {
@@ -1443,17 +1494,56 @@ export default class LoginHudExtension extends Extension {
                 committed_at: new Date().toISOString(),
             });
             this._commitWrittenOperationId = status.operationId;
-            if (status.shutdownOrigin === 'preflight') {
-                this._hud.setAwaitingPrepared(status.shutdownAction || this._preflightAction);
-                this._checkPreparedHandoff();
-            } else {
-                this._hud.setHandoffStarted(status.shutdownAction);
-            }
+            this._hud.setAwaitingPrepared(status.shutdownAction || this._preflightAction);
+            this._startPreparedPolling(status.operationId);
+            this._checkPreparedHandoff();
         } catch (error) {
             this._hud.setTransportNotice(
                 `Shutdown remains stopped because commit failed: ${error.message}`
             );
         }
+    }
+
+    _startPreparedPolling(operationId) {
+        this._stopPreparedPolling();
+        const began = GLib.get_monotonic_time();
+        this._preparedPollId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            100,
+            () => {
+                if (!this._hud || this._activeOperationId !== operationId ||
+                    this._commitWrittenOperationId !== operationId ||
+                    this._nativeHandoffOperationId ||
+                    this._locallyCancelledOperationId === operationId) {
+                    this._preparedPollId = 0;
+                    return GLib.SOURCE_REMOVE;
+                }
+                const elapsedMs = (GLib.get_monotonic_time() - began) / 1000;
+                if (elapsedMs >= PREPARED_POLL_TIMEOUT_MS) {
+                    this._preparedPollId = 0;
+                    const status = this._lastGoodStatus;
+                    const cancelled = status?.operationId === operationId &&
+                        this._requestCancel(status);
+                    if (cancelled) {
+                        this._dismissed = true;
+                        this._syncVisibility();
+                        Main.notifyError(
+                            'Shutdown cancelled safely',
+                            'The coordinator did not publish final authorization in time.'
+                        );
+                    }
+                    return GLib.SOURCE_REMOVE;
+                }
+                this._checkPreparedHandoff();
+                return GLib.SOURCE_CONTINUE;
+            }
+        );
+    }
+
+    _stopPreparedPolling() {
+        if (this._preparedPollId)
+            GLib.Source.remove(this._preparedPollId);
+        this._preparedPollId = 0;
     }
 
     _checkPreparedHandoff() {
@@ -1493,8 +1583,7 @@ export default class LoginHudExtension extends Extension {
                 if (prepared.schema_version !== 1 ||
                     prepared.operation_id !== status.operationId ||
                     prepared.session_id !== status.sessionId ||
-                    (prepared.action !== undefined &&
-                        prepared.action !== status.shutdownAction))
+                    prepared.action !== status.shutdownAction)
                     return;
                 this._handoffToGnome(status);
             } catch (error) {
@@ -1523,19 +1612,52 @@ export default class LoginHudExtension extends Extension {
         }
 
         this._nativeHandoffOperationId = status.operationId;
+        this._stopPreparedPolling();
         this._hud.setHandoffStarted(status.shutdownAction || this._preflightAction);
         this._confirmBypass = true;
         try {
             Promise.resolve(this._originalEndSessionConfirm.call(this._endSessionDialog, signal))
-                .catch(error => {
-                    console.error(`Login HUD GNOME handoff failed: ${error.message}`);
-                    this._hud?.setTransportNotice(
-                        `GNOME did not accept the final shutdown handoff: ${error.message}`
-                    );
-                });
+                .catch(error => this._handleNativeHandoffFailure(status, error));
+        } catch (error) {
+            this._handleNativeHandoffFailure(status, error);
         } finally {
             this._confirmBypass = false;
         }
+    }
+
+    _handleNativeHandoffFailure(status, error) {
+        if (this._nativeHandoffOperationId !== status.operationId)
+            return;
+        console.error(`Login HUD GNOME handoff failed: ${error.message}`);
+        this._nativeHandoffOperationId = null;
+        this._locallyCancelledOperationId = status.operationId;
+        try {
+            this._writeProtocolFile(this._cancelFile, 'shutdown-cancel', {
+                schema_version: 1,
+                operation_id: status.operationId,
+                session_id: status.sessionId,
+                requested_at: new Date().toISOString(),
+            });
+        } catch (cancelError) {
+            console.warn(
+                `Login HUD could not cancel a rejected GNOME handoff: ${cancelError.message}`
+            );
+        }
+        this._cancelNativeEndSessionOnce(status.operationId);
+        if (this._preflightOperationId === status.operationId) {
+            this._preflightOperationId = null;
+            this._preflightAction = null;
+            this._preflightSignal = null;
+        }
+        this._dismissed = true;
+        this._syncVisibility();
+        this._hud?.setTransportNotice(
+            `Shutdown cancelled because GNOME rejected the final handoff: ${error.message}`
+        );
+        Main.notifyError(
+            'Shutdown cancelled safely',
+            `GNOME rejected the final shutdown handoff: ${error.message}`
+        );
     }
 
     _handleTerminalShutdownStatus(status) {
@@ -1546,10 +1668,12 @@ export default class LoginHudExtension extends Extension {
         if (!status.cancelled && !hasFailure)
             return;
 
+        const wasHandedOff = this._nativeHandoffOperationId === status.operationId;
+        this._stopPreparedPolling();
         this._cancelShutdownCountdown();
         this._renderAckScheduledOperationId = null;
         this._locallyCancelledOperationId = status.operationId;
-        if (status.shutdownOrigin === 'preflight' && hasFailure) {
+        if (hasFailure) {
             try {
                 this._writeProtocolFile(this._cancelFile, 'shutdown-cancel', {
                     schema_version: 1,
@@ -1566,7 +1690,15 @@ export default class LoginHudExtension extends Extension {
         // A terminal failure/cancellation ends the pending GNOME request
         // exactly once. Repeated cancel calls can accidentally close a new
         // dialog opened immediately afterwards.
-        this._cancelNativeEndSessionOnce(status.operationId);
+        if (wasHandedOff) {
+            // GNOME emitted CancelEndSession after the handed-off operation.
+            // Mark that native side terminal before clearing handoff state so
+            // repeated status writes cannot emit Canceled into a later dialog.
+            this._nativeCancelledOperationId = status.operationId;
+            this._nativeHandoffOperationId = null;
+        } else {
+            this._cancelNativeEndSessionOnce(status.operationId);
+        }
         if (this._preflightOperationId === status.operationId) {
             this._preflightOperationId = null;
             this._preflightAction = null;
@@ -1627,6 +1759,16 @@ export default class LoginHudExtension extends Extension {
                     request.session_id === parsed.sessionId &&
                     SHUTDOWN_ACTIONS.has(request.action);
                 const matchesLocalPreflight = parsed.operationId === this._preflightOperationId;
+                if (parsed.mode === 'shutdown' &&
+                    !matchesRequest && !matchesLocalPreflight) {
+                    // A backend-only QueryEndSession status must never make a
+                    // HUD appear below GNOME's still-open confirmation. Every
+                    // visible shutdown status is bound to this extension's
+                    // post-confirmation private request.
+                    this._lastGoodStatus = null;
+                    this._syncVisibility();
+                    return;
+                }
                 if ((matchesRequest || matchesLocalPreflight) &&
                     !parsed.shutdownOriginExplicit)
                     parsed.shutdownOrigin = 'preflight';
@@ -1659,6 +1801,7 @@ export default class LoginHudExtension extends Extension {
                     this._cancelRequestPending = false;
                 }
                 if (parsed.shutdownOrigin === 'preflight' &&
+                    parsed.operationId !== this._locallyCancelledOperationId &&
                     (!this._preflightOperationId ||
                         this._preflightOperationId === parsed.operationId)) {
                     this._preflightOperationId = parsed.operationId;
@@ -1706,7 +1849,7 @@ export default class LoginHudExtension extends Extension {
             status.cancelled || !status.operationId || this._cancelRequestPending ||
             this._nativeHandoffOperationId === status.operationId
         )
-            return;
+            return false;
 
         try {
             this._writeProtocolFile(this._cancelFile, 'shutdown-cancel', {
@@ -1720,16 +1863,18 @@ export default class LoginHudExtension extends Extension {
             this._cancelRequestPending = true;
             this._hud.setCancellationPending(true);
             this._hud.setTransportNotice(
-                'Cancellation requested. GNOME shutdown is being cancelled; ' +
-                'safe recovery will follow if needed.'
+                'Cancellation requested. The checkpoint worker is stopping; ' +
+                'no system services were changed.'
             );
             this._cancelNativeEndSessionOnce(status.operationId);
+            return true;
         } catch (error) {
             this._cancelRequestPending = false;
             this._hud.setCancellationPending(false);
             this._hud.setTransportNotice(
                 `Could not send the cancellation request: ${error.message}`
             );
+            return false;
         }
     }
 
