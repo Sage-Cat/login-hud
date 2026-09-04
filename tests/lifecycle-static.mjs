@@ -47,6 +47,26 @@ assert.match(
 );
 assert.match(
     source,
+    /const DISMISSED_FILENAME = 'startup-hud-dismissed\.json';[\s\S]*?_startupDismissalMatches\(status\)[\s\S]*?dismissal\.session_id === status\.sessionId &&[\s\S]*?dismissal\.started_at === status\.startedAt/,
+    'a dismissed startup HUD must stay hidden for the exact GNOME startup transaction'
+);
+assert.match(
+    source,
+    /_recordStartupDismissal\(status, reason\)[\s\S]*?session_id: status\.sessionId,[\s\S]*?started_at: status\.startedAt,[\s\S]*?reason,/,
+    'startup dismissal must be written as a session-bound runtime marker'
+);
+assert.match(
+    source,
+    /const atSessionBoundary = Main\.sessionMode\.isLocked \|\| Main\.sessionMode\.isGreeter;[\s\S]*?_startupCanAutoDismiss\(this\._lastGoodStatus\)[\s\S]*?_recordStartupDismissal\(this\._lastGoodStatus, 'session-boundary'\)/,
+    'a completed successful startup HUD must not return after lock or greeter login'
+);
+assert.match(
+    source,
+    /const STALE_STARTUP_PRESENTATION_MS = 5 \* 60 \* 1000;[\s\S]*?_startupPresentationIsStale\(status\)[\s\S]*?Date\.now\(\) - updatedAt >=[\s\S]*?STALE_STARTUP_PRESENTATION_MS/,
+    'an extension reload must not resurrect an old completed startup HUD'
+);
+assert.match(
+    source,
     /_installHudChrome\(\) \{[\s\S]*?this\._clockId = GLib\.timeout_add_seconds/,
     'periodic HUD work must start only with the validated HUD'
 );

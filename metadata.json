@@ -3,5 +3,5 @@
   "name": "Login HUD",
   "description": "A startup HUD and post-confirmation workspace checkpoint monitor.",
   "shell-version": ["46"],
-  "version": 8
+  "version": 9
 }
