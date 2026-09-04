@@ -15,6 +15,7 @@ import {State as ModalDialogState} from 'resource:///org/gnome/shell/ui/modalDia
 
 const STATUS_DIRECTORY = 'workspace-state';
 const STATUS_FILENAME = 'login-hud-status.json';
+const DISMISSED_FILENAME = 'startup-hud-dismissed.json';
 const CANCEL_FILENAME = 'shutdown-cancel.json';
 const REQUEST_FILENAME = 'shutdown-request.json';
 const RENDERED_FILENAME = 'shutdown-hud-rendered.json';
@@ -34,6 +35,7 @@ const SHUTDOWN_ORIGINS = new Set(['preflight']);
 const SHUTDOWN_COUNTDOWN_SECONDS = 3;
 const PREFLIGHT_STATUS_TIMEOUT_MS = 15000;
 const PREPARED_POLL_TIMEOUT_MS = 15000;
+const STALE_STARTUP_PRESENTATION_MS = 5 * 60 * 1000;
 
 function text(value, fallback = '') {
     return typeof value === 'string' && value.length > 0 ? value : fallback;
@@ -735,6 +737,7 @@ export default class LoginHudExtension extends Extension {
             runtimeDirectory, STATUS_DIRECTORY,
         ]));
         this._statusFile = this._statusDirectory.get_child(STATUS_FILENAME);
+        this._dismissedFile = this._statusDirectory.get_child(DISMISSED_FILENAME);
         this._cancelFile = this._statusDirectory.get_child(CANCEL_FILENAME);
         this._requestFile = this._statusDirectory.get_child(REQUEST_FILENAME);
         this._renderedFile = this._statusDirectory.get_child(RENDERED_FILENAME);
@@ -768,6 +771,7 @@ export default class LoginHudExtension extends Extension {
         this._activeSessionId = null;
         this._activeMode = null;
         this._activeOperationId = null;
+        this._activeStartedAt = null;
         this._modalGrab = null;
         this._cancelRequestPending = false;
         this._nativeCancelledOperationId = null;
@@ -787,10 +791,7 @@ export default class LoginHudExtension extends Extension {
 
         this._hud = new LoginHud();
         this._hud.setCallbacks(
-            () => {
-                this._dismissed = true;
-                this._syncVisibility();
-            },
+            () => this._dismissHud(),
             path => this._openErrorLog(path),
             status => this._requestCancel(status)
         );
@@ -807,7 +808,9 @@ export default class LoginHudExtension extends Extension {
             }
             return Clutter.EVENT_PROPAGATE;
         });
-        this._sessionModeUpdatedId = Main.sessionMode.connect('updated', () => this._syncVisibility());
+        this._sessionModeUpdatedId = Main.sessionMode.connect('updated', () => {
+            this._syncVisibility();
+        });
 
         try {
             this._monitor = this._statusDirectory.monitor_directory(Gio.FileMonitorFlags.NONE, null);
@@ -878,6 +881,7 @@ export default class LoginHudExtension extends Extension {
         this._currentSessionId = null;
         this._sessionIdResolvePending = false;
         this._statusFile = null;
+        this._dismissedFile = null;
         this._cancelFile = null;
         this._requestFile = null;
         this._renderedFile = null;
@@ -887,6 +891,7 @@ export default class LoginHudExtension extends Extension {
         this._activeSessionId = null;
         this._activeMode = null;
         this._activeOperationId = null;
+        this._activeStartedAt = null;
         this._modalGrab = null;
         this._cancelRequestPending = false;
         this._nativeCancelledOperationId = null;
@@ -1180,6 +1185,60 @@ export default class LoginHudExtension extends Extension {
         this._hud?.set_size(global.stage.width, global.stage.height);
     }
 
+    _startupCanAutoDismiss(status) {
+        if (status?.mode !== 'startup')
+            return false;
+        const hasFailure = status.overallState === 'failed' ||
+            status.stages.some(stage => stage.state === 'failed');
+        return !hasFailure && status.stages.length > 0 &&
+            status.stages.every(stage => TERMINAL_STATES.has(stage.state));
+    }
+
+    _startupDismissalMatches(status) {
+        if (status?.mode !== 'startup' || !this._dismissedFile)
+            return false;
+        const dismissal = this._readProtocolFileSync(this._dismissedFile);
+        return dismissal?.schema_version === 1 &&
+            dismissal.session_id === status.sessionId &&
+            dismissal.started_at === status.startedAt;
+    }
+
+    _startupPresentationIsStale(status) {
+        if (!this._startupCanAutoDismiss(status))
+            return false;
+        const updatedAt = Date.parse(status.updatedAt);
+        return Number.isFinite(updatedAt) && Date.now() - updatedAt >=
+            STALE_STARTUP_PRESENTATION_MS;
+    }
+
+    _recordStartupDismissal(status, reason) {
+        if (status?.mode !== 'startup')
+            return;
+        this._dismissed = true;
+        try {
+            this._writeProtocolFile(this._dismissedFile, 'startup-hud-dismissed', {
+                schema_version: 1,
+                session_id: status.sessionId,
+                started_at: status.startedAt,
+                reason,
+                dismissed_at: new Date().toISOString(),
+            });
+        } catch (error) {
+            // Keep the current Shell session usable even if runtime storage is
+            // temporarily unavailable. A future extension reload may show the
+            // completed HUD again, but shutdown interception remains intact.
+            console.warn(`Login HUD could not persist startup dismissal: ${error.message}`);
+        }
+    }
+
+    _dismissHud() {
+        if (this._lastGoodStatus?.mode === 'startup')
+            this._recordStartupDismissal(this._lastGoodStatus, 'user');
+        else
+            this._dismissed = true;
+        this._syncVisibility();
+    }
+
     _installHudChrome() {
         if (!this._hud || this._chromeInstalled)
             return;
@@ -1211,13 +1270,17 @@ export default class LoginHudExtension extends Extension {
     _syncVisibility() {
         if (!this._hud)
             return;
+        const atSessionBoundary = Main.sessionMode.isLocked || Main.sessionMode.isGreeter;
+        if (!this._dismissed && atSessionBoundary &&
+            this._startupCanAutoDismiss(this._lastGoodStatus))
+            this._recordStartupDismissal(this._lastGoodStatus, 'session-boundary');
         // Do not render or reserve input before a complete, valid document is
         // available.  In particular, extension enablement must be passive
         // while GNOME is bringing up the session and display stack.
         const eligible = this._lastGoodStatus?.mode === 'shutdown' ||
             this._lastGoodStatus?.showOnStartup === true;
         const visible = Boolean(this._lastGoodStatus) && eligible && !this._dismissed &&
-            !Main.sessionMode.isLocked && !Main.sessionMode.isGreeter;
+            !atSessionBoundary;
         if (!visible)
             this._releaseModal();
         this._hud.visible = visible;
@@ -1782,13 +1845,15 @@ export default class LoginHudExtension extends Extension {
                 }
                 const isNewSessionOrMode = parsed.sessionId !== this._activeSessionId ||
                     parsed.mode !== this._activeMode ||
-                    parsed.operationId !== this._activeOperationId;
+                    parsed.operationId !== this._activeOperationId ||
+                    parsed.startedAt !== this._activeStartedAt;
                 if (isNewSessionOrMode) {
                     this._cancelShutdownCountdown();
                     this._dismissed = false;
                     this._activeSessionId = parsed.sessionId;
                     this._activeMode = parsed.mode;
                     this._activeOperationId = parsed.operationId;
+                    this._activeStartedAt = parsed.startedAt;
                     this._renderAckScheduledOperationId = null;
                     this._renderAckWrittenOperationId = null;
                     this._commitWrittenOperationId = null;
@@ -1796,6 +1861,13 @@ export default class LoginHudExtension extends Extension {
                     this._cancelRequestPending = false;
                     this._hud.resetExpansion();
                     this._hud.setCancellationPending(false);
+                }
+                if (parsed.mode === 'startup') {
+                    if (this._startupDismissalMatches(parsed)) {
+                        this._dismissed = true;
+                    } else if (this._startupPresentationIsStale(parsed)) {
+                        this._recordStartupDismissal(parsed, 'stale-completion');
+                    }
                 }
                 if (parsed.cancelled) {
                     this._cancelRequestPending = false;
