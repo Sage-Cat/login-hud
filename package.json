@@ -1,0 +1,16 @@
+{
+  "name": "login-hud-gnome-shell",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Development tooling for the Login HUD GNOME Shell extension",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "check": "make check",
+    "package": "make release-artifacts"
+  },
+  "devDependencies": {
+    "eslint": "10.10.0"
+  }
+}
