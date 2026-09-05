@@ -22,9 +22,15 @@ const RENDERED_FILENAME = 'shutdown-hud-rendered.json';
 const COMMIT_FILENAME = 'shutdown-commit.json';
 const PREPARED_FILENAME = 'shutdown-prepared.json';
 const SESSION_MANAGER_NAME = 'org.gnome.SessionManager';
+const SHUTDOWN_COORDINATOR_UNIT = 'wsctl-gnome-session.service';
 const DBUS_NAME = 'org.freedesktop.DBus';
 const DBUS_PATH = '/org/freedesktop/DBus';
 const DBUS_INTERFACE = 'org.freedesktop.DBus';
+const SYSTEMD_NAME = 'org.freedesktop.systemd1';
+const SYSTEMD_PATH = '/org/freedesktop/systemd1';
+const SYSTEMD_MANAGER_INTERFACE = 'org.freedesktop.systemd1.Manager';
+const SYSTEMD_UNIT_INTERFACE = 'org.freedesktop.systemd1.Unit';
+const PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties';
 const STATES = new Set([
     'pending', 'waiting', 'running', 'ready', 'degraded', 'failed', 'skipped',
 ]);
@@ -1076,6 +1082,16 @@ export default class LoginHudExtension extends Extension {
         if (!action)
             return this._originalEndSessionConfirm.call(this._endSessionDialog, signal);
 
+        // The extension is safe to install on its own. If the companion
+        // coordinator is missing or inactive, preserve GNOME's native action
+        // instead of retaining it for a preflight that cannot complete.
+        if (!this._shutdownCoordinatorIsActive()) {
+            console.warn(
+                'Login HUD shutdown coordinator is unavailable; using GNOME native shutdown.'
+            );
+            return this._originalEndSessionConfirm.call(this._endSessionDialog, signal);
+        }
+
         // GNOME may show a second "Power Off Anyway" dialog after another
         // application adds a JIT inhibitor. That confirmation continues the
         // already prepared operation and must never start a second preflight.
@@ -1143,6 +1159,39 @@ export default class LoginHudExtension extends Extension {
             this._cancelNativeEndSessionOnce(operationId);
         } finally {
             this._preflightStarting = false;
+        }
+    }
+
+    _shutdownCoordinatorIsActive() {
+        try {
+            const unitResult = Gio.DBus.session.call_sync(
+                SYSTEMD_NAME,
+                SYSTEMD_PATH,
+                SYSTEMD_MANAGER_INTERFACE,
+                'GetUnit',
+                new GLib.Variant('(s)', [SHUTDOWN_COORDINATOR_UNIT]),
+                new GLib.VariantType('(o)'),
+                Gio.DBusCallFlags.NONE,
+                2000,
+                null
+            );
+            const [unitPath] = unitResult.deepUnpack();
+            const stateResult = Gio.DBus.session.call_sync(
+                SYSTEMD_NAME,
+                unitPath,
+                PROPERTIES_INTERFACE,
+                'Get',
+                new GLib.Variant('(ss)', [SYSTEMD_UNIT_INTERFACE, 'ActiveState']),
+                new GLib.VariantType('(v)'),
+                Gio.DBusCallFlags.NONE,
+                2000,
+                null
+            );
+            const [activeState] = stateResult.recursiveUnpack();
+            return activeState === 'active';
+        } catch (error) {
+            console.warn(`Login HUD could not verify shutdown coordinator: ${error.message}`);
+            return false;
         }
     }
 
