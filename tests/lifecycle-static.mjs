@@ -92,6 +92,16 @@ assert.match(
 );
 assert.match(
     source,
+    /_interceptEndSessionConfirm\(signal\)[\s\S]*?!this\._shutdownCoordinatorIsActive\(\)[\s\S]*?return this\._originalEndSessionConfirm\.call\(this\._endSessionDialog, signal\)/,
+    'a missing shutdown coordinator must fail open to GNOME native shutdown'
+);
+assert.match(
+    source,
+    /_shutdownCoordinatorIsActive\(\)[\s\S]*?'GetUnit'[\s\S]*?SHUTDOWN_COORDINATOR_UNIT[\s\S]*?'ActiveState'[\s\S]*?recursiveUnpack\(\)[\s\S]*?=== 'active'[\s\S]*?return false;/,
+    'shutdown interception must require the live companion systemd service'
+);
+assert.match(
+    source,
     /this\._endSessionDialog\._confirm === this\._wrappedEndSessionConfirm[\s\S]*?this\._endSessionDialog\._confirm = this\._originalEndSessionConfirm;/,
     'the GNOME confirmation wrapper must be restored without clobbering another wrapper'
 );
