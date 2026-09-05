@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.5
+          cache: npm
+      - name: Install system tooling
+        run: sudo apt-get update && sudo apt-get install --yes gnome-shell jq shellcheck unzip
+      - name: Install pinned development dependencies
+        run: npm ci
+      - name: Require the tag to match the extension version
+        run: test "${GITHUB_REF_NAME#v}" = "$(jq -r .version metadata.json)"
+      - name: Build and validate release artifacts
+        run: make release-artifacts
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          dist/*.shell-extension.zip
+          dist/*.sha256
+          --verify-tag
+          --generate-notes
+          --title "Login HUD $GITHUB_REF_NAME"

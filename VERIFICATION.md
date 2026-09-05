@@ -1,14 +1,18 @@
 # Verification record
 
-Last checked: `2026-09-04T19:18:05+03:00` on GNOME Shell 46.0, native
+Last checked: `2026-09-05T12:09:34+03:00` on GNOME Shell 46.0, native
 Wayland.
 
 ## Confirmed
 
 - `make check` passes metadata validation, JavaScript parsing, ESLint, and the
-  static lifecycle safety assertions.
+  static lifecycle safety assertions. Installer scripts pass ShellCheck.
 - `tests/check.sh` passes the same repository checks through the supported test
   entry point.
+- A clean `npm ci` with Node 20.19.5 reports zero vulnerabilities, and
+  `make release-artifacts` builds a package whose exact file allowlist and
+  metadata are verified before its SHA-256 file is produced.
+- Install and uninstall were exercised against an isolated `XDG_DATA_HOME`.
 - The installed `metadata.json`, `extension.js`, and `stylesheet.css` under
   `~/.local/share/gnome-shell/extensions/login-hud-v2@sagecat.local/` are
   byte-identical to the tracked source.
@@ -29,6 +33,9 @@ Wayland.
   and a prepared marker matching the operation, session, and action. Prepared
   polling is bounded, and cancellation is operation-bound and emitted at most
   once across repeated status updates.
+- The final GNOME action is intercepted only while
+  `wsctl-gnome-session.service` is active; a missing companion service fails
+  open to the original native GNOME shutdown.
 - The complete workspace test target passes: 140 Python tests, the Chrome
   extension protocol checks, 14 gnome-winctl Python tests, 31 gnome-winctl Node
   tests, and the Login HUD static checks.
@@ -37,11 +44,10 @@ Wayland.
 
 ## Activation boundary
 
-The current GNOME Shell process loaded v2 version 8 at login and retains that
-JavaScript module across disable/enable on Wayland. Version 9 is installed and
-enabled, but its new lock/dismissal logic activates at the next fresh GNOME
-Shell login. The current v8 instance was made immediately safe by republishing
-the ready startup status with `show_startup_hud: false`.
+The current GNOME Shell process loaded v2 version 9 at login and retains that
+JavaScript module across disable/enable on Wayland. Version 10 is byte-identical
+between the tracked runtime source and the installed extension directory, but
+its coordinator fail-open check activates at the next fresh GNOME Shell login.
 
 ## Deliberately not claimed
 

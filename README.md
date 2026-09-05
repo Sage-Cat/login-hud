@@ -1,5 +1,31 @@
 # Login HUD
 
+[![CI](https://github.com/Sage-Cat/login-hud/actions/workflows/ci.yml/badge.svg)](https://github.com/Sage-Cat/login-hud/actions/workflows/ci.yml)
+
+![Login HUD shutdown preview](preview.png)
+
+Login HUD is a borderless GNOME Shell overlay for visualizing ordered desktop
+startup and pre-shutdown checkpoint work. Jobs have progress, state, expandable
+substeps, and local activity logs. The repository contains the Shell UI and its
+file protocol; the machine-specific state producer is deliberately separate.
+
+The current release targets GNOME Shell 46 on native Wayland. The shutdown hook
+uses GNOME Shell 46 internals and is therefore not advertised for other Shell
+versions without a compatibility review.
+
+## Safety model
+
+- Startup is display-only and never takes a modal input grab.
+- Shutdown work begins only after the final native **Power Off** or **Restart**
+  confirmation.
+- The extension intercepts shutdown only while the companion
+  `wsctl-gnome-session.service` is active. If it is absent or unavailable, the
+  original GNOME shutdown runs unchanged.
+- A shutdown requires an operation-bound request, painted HUD acknowledgement,
+  visible countdown, commit, and matching prepared marker.
+- Cancellation is allowed until the final handoff. The protocol never manages
+  GPU state, cloud mounts, or GNOME teardown.
+
 `login-hud-v2@sagecat.local` is a GNOME Shell 46 extension that displays startup or shutdown telemetry. It is deliberately passive during login: before it receives a complete valid status document for the current GNOME Session Manager instance it stays hidden and does not register Shell chrome, stage listeners, or a refresh timer. The wsctl coordinator stores the kernel boot ID from `/proc/sys/kernel/random/boot_id` in private persistent state, so only the first GNOME session after an actual boot may publish `show_startup_hud: true`; same-boot re-logins restore in the background without creating HUD chrome. Tmux presence is deliberately not used as the trigger because tmux becomes active during a genuine first-boot restore. Once eligible status is present, the extension uses ordinary Shell chrome rather than top chrome, and only the bounded HUD panel participates in pointer input. Startup never acquires a modal or input grab, while its controls remain closable and expandable. An active shutdown alone uses GNOME's system-modal pointer and keyboard grab for **Cancel shutdown**. Invalid startup telemetry remains fail-open; an intercepted power-off or restart is deliberately fail-closed until the coordinator proves that preparation finished.
 
 The extension watches this file (the directory is monitored so atomic rename writes are observed):
@@ -72,11 +98,59 @@ A new `session_id`, startup timestamp, or a change between `startup` and `shutdo
 
 ## Install and development
 
+### Install a release bundle
+
+Download both files from the matching GitHub release, verify the checksum, and
+install the ZIP for the current user:
+
 ```sh
-make check
-make install
+sha256sum --check login-hud-v2@sagecat.local.shell-extension.zip.sha256
+gnome-extensions install --force login-hud-v2@sagecat.local.shell-extension.zip
 gnome-extensions enable login-hud-v2@sagecat.local
 ```
+
+Log out and back in once before relying on the newly installed code.
+
+### Install from source
+
+```sh
+git clone https://github.com/Sage-Cat/login-hud.git
+cd login-hud
+npm ci
+make check install
+```
+
+The install script copies only `metadata.json`, `extension.js`, and
+`stylesheet.css` into the current user's GNOME extension directory and enables
+the UUID when the running Shell already knows it. Log out and back in after a
+new installation or upgrade; GNOME Wayland does not reliably reload changed
+JavaScript modules in place.
+
+To remove it:
+
+```sh
+make uninstall
+```
+
+The extension is safe without the companion service: it stays passive until a
+valid status document exists, and native GNOME shutdown remains fail-open. To
+use shutdown checkpointing, implement the documented runtime-file protocol and
+run its coordinator as the active user unit `wsctl-gnome-session.service`.
+
+### Build a release artifact
+
+On Ubuntu 24.04, install `jq`, Node.js 20.19 or newer with npm, `shellcheck`,
+`unzip`, and the GNOME extension CLI, then run:
+
+```sh
+npm ci
+make release-artifacts
+```
+
+This creates a GNOME Shell extension ZIP and adjacent SHA-256 file under
+`dist/`. `make package` verifies that the archive contains exactly the three
+runtime files. Tagged GitHub releases run the same checks and attach both
+artifacts automatically.
 
 For development, disable and enable the extension after changing files:
 
@@ -86,11 +160,12 @@ make install
 gnome-extensions enable login-hud-v2@sagecat.local
 ```
 
-`make package` creates a Shell extension ZIP in `dist/`. `make uninstall` removes only this extension's installed directory.
+In-place disable/enable is useful for UI iteration, but a fresh GNOME Shell
+login is the authoritative deployment test.
 
 ## Validation
 
-`make check` validates `metadata.json`, parses `extension.js` as an ES module with Node's stdin module syntax checker, and runs ESLint. `tests/check.sh` additionally checks lifecycle and two-phase shutdown invariants: no chrome before valid status parsing, install-before-layout, safe allocation checks, shutdown-only modal capture, durable request/paint/commit markers, prepared-marker matching, exact deferred GNOME handoff, cancellation, and wrapper restoration. Node is used only for static validation; the extension itself uses GNOME Shell GJS/GI APIs exclusively.
+`make check` validates `metadata.json`, parses `extension.js` as an ES module with Node's stdin module syntax checker, and runs the pinned ESLint toolchain. `tests/check.sh` additionally checks lifecycle and two-phase shutdown invariants: no chrome before valid status parsing, install-before-layout, safe allocation checks, coordinator fail-open, shutdown-only modal capture, durable request/paint/commit markers, prepared-marker matching, exact deferred GNOME handoff, cancellation, and wrapper restoration. Node is used only for static validation; the extension itself uses GNOME Shell GJS/GI APIs exclusively.
 
 The latest local source/install verification and its explicit activation boundary are recorded in [`VERIFICATION.md`](VERIFICATION.md).
 
