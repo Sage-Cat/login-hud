@@ -1984,8 +1984,8 @@ export default class LoginHudExtension extends Extension {
             this._cancelRequestPending = true;
             this._hud.setCancellationPending(true);
             this._hud.setTransportNotice(
-                'Cancellation requested. The checkpoint worker is stopping; ' +
-                'no system services were changed.'
+                'Cancellation requested. Prepared jobs are being restored ' +
+                'before the shutdown transaction closes.'
             );
             this._cancelNativeEndSessionOnce(status.operationId);
             return true;
