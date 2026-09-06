@@ -1,7 +1,7 @@
 {
   "uuid": "login-hud-v2@sagecat.local",
   "name": "Login HUD",
-  "description": "A startup HUD and post-confirmation workspace checkpoint monitor.",
+  "description": "A startup HUD and post-confirmation shutdown job monitor.",
   "shell-version": ["46"],
-  "version": 10
+  "version": 11
 }
