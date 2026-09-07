@@ -140,6 +140,10 @@ assert.match(
     /const SHUTDOWN_COUNTDOWN_SECONDS = 3;[\s\S]*?_startShutdownCountdown\(status\)[\s\S]*?_commitShutdown\(this\._lastGoodStatus\)/,
     'a visible three-second countdown must precede shutdown commit'
 );
+assert.ok(
+    source.includes("'System shutdown ready with safe fallbacks'"),
+    'degraded shutdown completion must be distinguishable from failure'
+);
 assert.match(
     source,
     /this\._hud\.setShutdownCountdown\(action, seconds\);[\s\S]*?Clutter\.RepaintFlags\.POST_PAINT[\s\S]*?const began = GLib\.get_monotonic_time\(\);[\s\S]*?GLib\.get_monotonic_time\(\) - began/,

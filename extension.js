@@ -394,6 +394,10 @@ class LoginHud extends St.Widget {
             : 'SESSION / STARTUP TELEMETRY';
         this._title.text = status.overallState === 'failed'
             ? isShutdown ? 'System shutdown needs attention' : 'Session startup needs attention'
+            : status.overallState === 'degraded'
+                ? isShutdown
+                    ? 'System shutdown ready with safe fallbacks'
+                    : 'Session systems ready with safe fallbacks'
             : TERMINAL_STATES.has(status.overallState)
                 ? isShutdown ? 'System shutdown complete' : 'Session systems ready'
                 : isShutdown ? 'Deinitializing system' : 'Restoring workspace';
