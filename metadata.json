@@ -3,5 +3,5 @@
   "name": "Login HUD",
   "description": "A startup HUD and post-confirmation shutdown job monitor.",
   "shell-version": ["46"],
-  "version": 12
+  "version": 13
 }
