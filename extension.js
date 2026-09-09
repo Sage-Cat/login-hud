@@ -691,8 +691,15 @@ class LoginHud extends St.Widget {
             });
             button.connect('clicked', () => this._onOpenLogRequested?.(status.errorLogPath));
             this._actions.add_child(button);
-            this._addCloseButton('Close');
             this._primaryAction = button;
+            if (status.mode === 'shutdown') {
+                this._actions.add_child(new St.Label({
+                    style_class: 'login-hud-action-status',
+                    text: 'Shutdown stopped · review the error and retry power off',
+                }));
+            } else {
+                this._addCloseButton('Close');
+            }
         } else if (status.mode === 'shutdown' && this._handoffStarted) {
             this._actions.add_child(new St.Label({
                 style_class: 'login-hud-action-status',
@@ -1285,6 +1292,15 @@ export default class LoginHudExtension extends Extension {
     }
 
     _dismissHud() {
+        const status = this._lastGoodStatus;
+        const hasFailure = status?.overallState === 'failed' ||
+            status?.stages.some(stage => stage.state === 'failed');
+        if (status?.mode === 'shutdown' && hasFailure) {
+            this._hud?.setTransportNotice(
+                'A failed shutdown report remains open until a new shutdown attempt or logout.'
+            );
+            return;
+        }
         if (this._lastGoodStatus?.mode === 'startup')
             this._recordStartupDismissal(this._lastGoodStatus, 'user');
         else
@@ -1875,12 +1891,17 @@ export default class LoginHudExtension extends Extension {
                     request.session_id === parsed.sessionId &&
                     SHUTDOWN_ACTIONS.has(request.action);
                 const matchesLocalPreflight = parsed.operationId === this._preflightOperationId;
+                const terminalShutdown = parsed.mode === 'shutdown' &&
+                    (parsed.cancelled || parsed.overallState === 'failed' ||
+                        parsed.stages.some(stage => stage.state === 'failed'));
                 if (parsed.mode === 'shutdown' &&
-                    !matchesRequest && !matchesLocalPreflight) {
+                    !matchesRequest && !matchesLocalPreflight && !terminalShutdown) {
                     // A backend-only QueryEndSession status must never make a
                     // HUD appear below GNOME's still-open confirmation. Every
-                    // visible shutdown status is bound to this extension's
-                    // post-confirmation private request.
+                    // non-terminal shutdown status is bound to this
+                    // extension's post-confirmation private request. A
+                    // terminal failure is safe to keep visible because it can
+                    // neither acquire a modal grab nor authorize handoff.
                     this._lastGoodStatus = null;
                     this._syncVisibility();
                     return;
@@ -2009,22 +2030,32 @@ export default class LoginHudExtension extends Extension {
             return;
         }
 
+        const status = this._lastGoodStatus;
+        const hasFailure = status?.overallState === 'failed' ||
+            status?.stages.some(stage => stage.state === 'failed');
+        const keepVisible = status?.mode === 'shutdown' && hasFailure;
         const uri = Gio.File.new_for_path(path).get_uri();
         try {
-            this._dismissed = true;
-            this._syncVisibility();
+            if (!keepVisible) {
+                this._dismissed = true;
+                this._syncVisibility();
+            }
             Gio.AppInfo.launch_default_for_uri_async(uri, null, null, (_source, result) => {
                 try {
                     Gio.AppInfo.launch_default_for_uri_finish(result);
                 } catch (error) {
-                    this._dismissed = false;
-                    this._syncVisibility();
+                    if (!keepVisible) {
+                        this._dismissed = false;
+                        this._syncVisibility();
+                    }
                     this._hud?.reportLogLaunchFailure(error.message);
                 }
             });
         } catch (error) {
-            this._dismissed = false;
-            this._syncVisibility();
+            if (!keepVisible) {
+                this._dismissed = false;
+                this._syncVisibility();
+            }
             this._hud?.reportLogLaunchFailure(error.message);
         }
     }

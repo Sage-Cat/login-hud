@@ -77,6 +77,21 @@ assert.match(
 );
 assert.match(
     source,
+    /if \(hasFailure\) \{[\s\S]*?status\.mode === 'shutdown'[\s\S]*?Shutdown stopped · review the error and retry power off[\s\S]*?else \{\s*this\._addCloseButton\('Close'\);/,
+    'a failed shutdown must expose its log without a close action'
+);
+assert.match(
+    source,
+    /const terminalShutdown = parsed\.mode === 'shutdown'[\s\S]*?!matchesRequest && !matchesLocalPreflight && !terminalShutdown/,
+    'a terminal shutdown failure must remain visible after active request cleanup'
+);
+assert.match(
+    source,
+    /_openErrorLog\(path\)[\s\S]*?const keepVisible = status\?\.mode === 'shutdown' && hasFailure;[\s\S]*?if \(!keepVisible\) \{\s*this\._dismissed = true;/,
+    'opening the full error log must not dismiss a failed shutdown HUD'
+);
+assert.match(
+    source,
     /const grab = Main\.pushModal\(this\._hud, \{[\s\S]*?actionMode: Shell\.ActionMode\.SYSTEM_MODAL/,
     'shutdown cancellation must retain its system-modal grab'
 );
