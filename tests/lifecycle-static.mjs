@@ -152,8 +152,8 @@ assert.match(
 );
 assert.match(
     source,
-    /const SHUTDOWN_COUNTDOWN_SECONDS = 3;[\s\S]*?_startShutdownCountdown\(status\)[\s\S]*?_commitShutdown\(this\._lastGoodStatus\)/,
-    'a visible three-second countdown must precede shutdown commit'
+    /const SHUTDOWN_COUNTDOWN_SECONDS = 5;[\s\S]*?_startShutdownCountdown\(status\)[\s\S]*?_commitShutdown\(this\._lastGoodStatus\)/,
+    'a visible five-second countdown must precede shutdown commit'
 );
 assert.ok(
     source.includes("'System shutdown ready with safe fallbacks'"),
@@ -162,7 +162,7 @@ assert.ok(
 assert.match(
     source,
     /this\._hud\.setShutdownCountdown\(action, seconds\);[\s\S]*?Clutter\.RepaintFlags\.POST_PAINT[\s\S]*?const began = GLib\.get_monotonic_time\(\);[\s\S]*?GLib\.get_monotonic_time\(\) - began/,
-    'the monotonic countdown clock must start only after the visible 3 frame is painted'
+    'the monotonic countdown clock must start only after the initial countdown frame is painted'
 );
 assert.match(
     source,

@@ -36,6 +36,37 @@ $XDG_RUNTIME_DIR/workspace-state/login-hud-status.json
 
 ## Status schema
 
+### Startup-only “Важливе” tab (version 16)
+
+Startup has **Відновлення** and **Важливе** tabs. Shutdown has no tabs and never
+loads or acts on important-system incidents. The optional private report is
+`$XDG_RUNTIME_DIR/workspace-state/alerts.json`, produced by `wsctl alerts`.
+
+Startup also has a passive **GC-профілі** tab. It reads
+`${XDG_STATE_HOME:-$HOME/.local/state}/gc-profiled/status.json`, showing every
+profile with its latest successful cleanup or failure time. A stopped daemon,
+missing or malformed report, and a heartbeat older than 30 seconds are shown as
+unavailable; the tab never starts or stops cleanup.
+Missing/malformed/stale reports are shown as unverified, not healthy. Updates
+cannot open the HUD, override its once-per-boot policy or block restoration.
+
+The first-party allowlist, read-only local/remote scans and durable
+incident database belong to workspace-state, not this extension. The UI shows
+only active `blocker`/`critical` incidents from first-party sources, with
+expandable safe diagnostics. **Переглянуто** acknowledges without resolving or
+hiding an active incident; resolved history remains available through the CLI.
+Only the fixed `~/.local/bin/wsctl alerts ack SOURCE CODE` command is launched,
+with validated identifiers and no shell. No commands or links from incident
+content are executed. Raw journal messages/credentials are not part of the file
+contract. Reports are limited to 64 sources and 200 displayed incidents.
+
+Install backend collection using `make install-alerts` in workspace-state. Its
+`docs/owned-system-alerts.md` documents registration, reports, resolution and
+coverage limits. A HUD update takes effect at the next normal GNOME login on
+Wayland; installation does not restart the current Shell or change its services.
+
+### Restoration/shutdown progress document
+
 Writers should write a complete replacement to a temporary file in the same directory, then atomically rename it to `login-hud-status.json`.
 
 ```json
@@ -90,11 +121,26 @@ error-log control.
 
 Every displayed job is expandable by mouse or keyboard. Its `events` array is shown as a timestamped activity log; the wsctl producer keeps the last 32 distinct state/message transitions per stage. Stages with the same `group_id` are rendered as one aggregate job using `group_label`. Expanding that job shows each internal stage and a merged chronological log. Startup combines GNOME Wayland with display/workspace readiness, combines tmux-resurrect with Alacritty/tmux reconciliation, and combines `gdrive`, `nextcloud`, `pdrive`, and `warmup` as a single cloud-drive job. Shutdown contains the tmux checkpoint, desktop/browser checkpoint, dynamically configured pre-shutdown profile jobs, and checkpoint-integrity proof. It never stops cloud drives, warm-up services, or GNOME components; Ubuntu performs normal service teardown after the handoff.
 
-The overview progress is derived from displayed jobs. A grouped job's progress is the average of its internal stages. A terminal stage without a fraction counts as complete; a non-terminal stage without one counts as not-yet-complete. Expanded content scrolls inside a bounded panel rather than growing beyond the screen.
+The overview progress is derived from displayed jobs. A grouped job's progress is the average of its internal stages. A terminal stage without a fraction counts as complete; a non-terminal stage without one counts as not-yet-complete.
+
+The panel is up to 900 logical pixels wide and uses the primary monitor's usable
+height, with a 24-pixel margin on each edge. The normal eight-job startup overview
+fits without scrolling on a 1080p display at 100% scale. There is no fixed
+520-pixel list cap: header, notice and button heights are measured, leaving the
+remaining space for jobs. Expanded logs, extra profiles and smaller/high-DPI
+displays scroll only when necessary; Close/Cancel stays outside the scroll area.
+Monitor, work-area and scale changes recalculate the layout.
 
 In `startup` mode, when every stage is terminal (`ready`, `degraded`, `failed`, or `skipped`) and none failed, the HUD exposes **OK**. Pressing it records a private dismissal marker bound to the exact GNOME session and startup timestamp, so extension reloads cannot resurrect the completed HUD. Locking the screen or entering the greeter also dismisses a completed non-failing startup HUD; an unlock therefore never presents stale startup progress as a new login. A completed status older than five minutes is ignored if the extension is enabled later. Active restoration and failures are not automatically dismissed. Startup controls do not focus themselves or capture keyboard/pointer input; they can be clicked or reached normally from the bounded panel.
 
-For an ordinary power-off or restart, GNOME first shows its stock confirmation. GNOME's early `QueryEndSession` is answered passively and cannot start a HUD or checkpoint. Only after the user presses the final **Power Off** or **Restart** button does the extension intercept the corresponding `_confirm` callback and retain the exact original signal. It waits until the native dialog is fully closed, writes a private `shutdown-request.json`, and then allows the coordinator to show the modal HUD and save tmux plus desktop/browser state. The extension never emits the retained signal merely because status says ready. It first waits for the ready HUD to be allocated and painted, writes `shutdown-hud-rendered.json`, displays a visible three-second countdown, writes `shutdown-commit.json`, and finally requires a matching `shutdown-prepared.json` before invoking GNOME's saved confirmation. If GNOME subsequently presents **Power Off Anyway** because another application inhibited logout, that confirmation continues the already prepared operation without starting another checkpoint.
+For an ordinary power-off or restart, GNOME first shows its stock confirmation. GNOME's early `QueryEndSession` is answered passively and cannot start a HUD or checkpoint. Only after the user presses the final **Power Off** or **Restart** button does the extension intercept the corresponding `_confirm` callback and retain the exact original signal. It waits until the native dialog is fully closed, writes a private `shutdown-request.json`, and then allows the coordinator to show the modal HUD and save tmux plus desktop/browser state. The extension never emits the retained signal merely because status says ready. It first waits for the ready HUD to be allocated and painted, writes `shutdown-hud-rendered.json`, displays a visible five-second countdown, writes `shutdown-commit.json`, and finally requires a matching `shutdown-prepared.json` before invoking GNOME's saved confirmation. If GNOME subsequently presents **Power Off Anyway** because another application inhibited logout, that confirmation continues the already prepared operation without starting another checkpoint.
+
+The final countdown must remain visible and allocated throughout, with an
+explicit ready/degraded overall result. Lock/greeter transition, hidden HUD,
+lost allocation or a newly failed status prevents commit/handoff and requests
+cancellation. The countdown starts only after the first completed-status frame
+is painted. Its start and final native handoff are journalled with the operation
+ID, so a later boot can distinguish checkpoint completion from OS teardown.
 
 The companion coordinator may also hold a logind block inhibitor while the
 graphical session is active. The HUD protocol does not release it: only the

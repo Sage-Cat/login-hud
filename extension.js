@@ -15,6 +15,8 @@ import {State as ModalDialogState} from 'resource:///org/gnome/shell/ui/modalDia
 
 const STATUS_DIRECTORY = 'workspace-state';
 const STATUS_FILENAME = 'login-hud-status.json';
+const ALERTS_FILENAME = 'alerts.json';
+const GC_STATUS_FILENAME = 'status.json';
 const DISMISSED_FILENAME = 'startup-hud-dismissed.json';
 const CANCEL_FILENAME = 'shutdown-cancel.json';
 const REQUEST_FILENAME = 'shutdown-request.json';
@@ -38,10 +40,15 @@ const TERMINAL_STATES = new Set(['ready', 'degraded', 'failed', 'skipped']);
 const MODES = new Set(['startup', 'shutdown']);
 const SHUTDOWN_ACTIONS = new Set(['poweroff', 'restart']);
 const SHUTDOWN_ORIGINS = new Set(['preflight']);
-const SHUTDOWN_COUNTDOWN_SECONDS = 3;
+const SHUTDOWN_COUNTDOWN_SECONDS = 5;
 const PREFLIGHT_STATUS_TIMEOUT_MS = 15000;
 const PREPARED_POLL_TIMEOUT_MS = 15000;
 const STALE_STARTUP_PRESENTATION_MS = 5 * 60 * 1000;
+const GC_STALE_AFTER_MS = 30 * 1000;
+const GC_FUTURE_TOLERANCE_MS = 5 * 1000;
+const GC_MAX_STATUS_BYTES = 2 * 1024 * 1024;
+const GC_MAX_PROFILES = 256;
+const GC_STATES = new Set(['pending', 'running', 'ok', 'failed', 'disabled']);
 
 function text(value, fallback = '') {
     return typeof value === 'string' && value.length > 0 ? value : fallback;
@@ -276,12 +283,139 @@ function overallFraction(stages) {
     return total / stages.length;
 }
 
+// Work-area coordinates are stage pixels; St CSS lengths are logical pixels.
+function normalizeAlerts(raw) {
+    if (raw?.schema_version !== 1 || !Array.isArray(raw.sources) ||
+        !Array.isArray(raw.incidents) || raw.sources.length > 64 || raw.incidents.length > 200)
+        throw new Error('Invalid owned-system report');
+    const sources = raw.sources.filter(source => source && typeof source === 'object' &&
+        source.ownership === 'first-party' && typeof source.id === 'string' &&
+        /^[a-z0-9][a-z0-9_.-]{0,79}$/.test(source.id) && typeof source.label === 'string').map(source => ({
+        ...source, label: source.label.slice(0, 120), host: String(source.host ?? 'local').slice(0, 80),
+        source_ref: String(source.source_ref ?? '').slice(0, 300),
+        detail: String(source.detail ?? '').slice(0, 1500),
+    }));
+    const ids = new Set(sources.map(source => source.id));
+    const severities = {"auth-required": "blocker", "service-failed": "critical",
+        "service-unavailable": "blocker", "restart-loop": "critical", "plugin-failed": "critical", "critical-log": "critical"};
+    const incidents = raw.incidents.filter(item => item && typeof item === 'object' && ids.has(item.source) &&
+        typeof item.code === 'string' &&
+        /^[a-z0-9][a-z0-9_.-]{0,79}$/.test(item.code) &&
+        typeof item.message === 'string' && (item.active === true || item.active === 1) &&
+        ['blocker', 'critical'].includes(item.severity ?? severities[item.code])).map(item => ({
+        ...item, severity: item.severity ?? severities[item.code] ?? 'warning', active: true, acknowledged: Boolean(item.acknowledged),
+        message: item.message.slice(0, 300), detail: String(item.detail ?? '').slice(0, 1500),
+    }));
+    const lastScan = Date.parse(raw.last_scan_at ?? '');
+    return {sources, incidents, updatedAt: String(raw.last_scan_at ?? ''),
+        stale: !raw.boot_id || raw.last_scan_boot_id !== raw.boot_id ||
+            !Number.isFinite(lastScan) || Date.now() - lastScan > 15 * 60 * 1000,
+        scanning: raw.scanning === true, scanError: String(raw.scan_error ?? '').slice(0, 500),
+        incomplete: raw.verification_incomplete === true,
+        unread: incidents.filter(item => !item.acknowledged).length,
+        total: incidents.length};
+}
+
+function safeGcName(value, fallback) {
+    if (typeof value !== 'string')
+        return fallback;
+    const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    return cleaned ? cleaned.slice(0, 160) : fallback;
+}
+
+function gcTimestamp(value) {
+    return value === null ? null : typeof value === 'string' && Number.isFinite(Date.parse(value))
+        ? value : null;
+}
+
+function normalizeGcProfiles(raw, now = Date.now()) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw) ||
+        raw.schema_version !== 1 || typeof raw.updated_at !== 'string' ||
+        !Number.isFinite(Date.parse(raw.updated_at)) ||
+        raw.daemon === null || typeof raw.daemon !== 'object' || Array.isArray(raw.daemon) ||
+        !['running', 'stopped'].includes(raw.daemon.state) ||
+        !Number.isInteger(raw.daemon.pid) || raw.daemon.pid < 0 ||
+        !Array.isArray(raw.profiles))
+        throw new Error('Некоректний звіт GC-профілів.');
+    const age = now - Date.parse(raw.updated_at);
+    const stale = age > GC_STALE_AFTER_MS || age < -GC_FUTURE_TOLERANCE_MS;
+    const daemonAvailable = raw.daemon.state === 'running' && !stale;
+    const profiles = raw.profiles.slice(0, GC_MAX_PROFILES).map((item, index) => {
+        const fallback = `Профіль ${index + 1}`;
+        if (item === null || typeof item !== 'object' || Array.isArray(item) ||
+            typeof item.name !== 'string' || !item.name.trim() ||
+            typeof item.enabled !== 'boolean' || !GC_STATES.has(item.state) ||
+            typeof item.message !== 'string') {
+            return {name: fallback, enabled: true, state: 'failed', invalid: true,
+                lastStartedAt: null, lastFinishedAt: null, lastSuccessAt: null,
+                lastFailureAt: null, nextRunAt: null, message: 'Некоректний запис профілю.'};
+        }
+        const timestampFields = ['last_started_at', 'last_finished_at', 'last_success_at',
+            'last_failure_at', 'next_run_at'];
+        const invalidTimestamp = timestampFields.some(field =>
+            item[field] !== null && gcTimestamp(item[field]) === null);
+        return {
+            name: safeGcName(item.name, fallback), enabled: item.enabled, state: invalidTimestamp
+                ? 'failed' : item.state, invalid: invalidTimestamp,
+            lastStartedAt: gcTimestamp(item.last_started_at),
+            lastFinishedAt: gcTimestamp(item.last_finished_at),
+            lastSuccessAt: gcTimestamp(item.last_success_at),
+            lastFailureAt: gcTimestamp(item.last_failure_at),
+            nextRunAt: gcTimestamp(item.next_run_at),
+            message: invalidTimestamp ? 'Некоректний час у записі профілю.' : safeGcName(item.message, ''),
+        };
+    });
+    return {updatedAt: raw.updated_at, daemon: {...raw.daemon}, profiles, stale,
+        truncated: raw.profiles.length > GC_MAX_PROFILES, daemonAvailable, error: ''};
+}
+
+function gcProfilePresentation(profile, daemonAvailable = true) {
+    const successTime = profile.lastSuccessAt ||
+        (profile.state === 'ok' ? profile.lastFinishedAt : null);
+    if (!daemonAvailable) {
+        const failure = profile.lastFailureAt;
+        return {icon: 'dialog-warning-symbolic', style: 'failed', label: 'Недоступний',
+            timeLabel: failure ? 'Остання помилка' : successTime ? 'Останнє очищення' : '',
+            time: failure || successTime};
+    }
+    if (profile.invalid || profile.state === 'failed')
+        return {icon: 'dialog-warning-symbolic', style: 'failed', label: 'Помилка',
+            timeLabel: profile.lastFailureAt ? 'Остання помилка' : successTime ? 'Останнє очищення' : '',
+            time: profile.lastFailureAt || successTime};
+    if (profile.state === 'ok')
+        return {icon: 'object-select-symbolic', style: 'ok', label: 'OK',
+            timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
+    if (profile.state === 'disabled')
+        return {icon: 'media-playback-stop-symbolic', style: 'disabled', label: 'Вимкнено',
+            timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
+    if (profile.state === 'running')
+        return {icon: 'process-working-symbolic', style: 'running', label: 'Виконується',
+            timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
+    return {icon: 'content-loading-symbolic', style: 'pending', label: 'Очікує',
+        timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
+}
+
+function gcEventTime(value) {
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed))
+        return '--';
+    return new Date(parsed).toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
+}
+
+function hudBounds(workArea, scaleFactor) {
+    const scale = Math.max(1, scaleFactor);
+    return {
+        width: Math.max(1, Math.min(900, Math.floor(workArea.width / scale) - 48)),
+        height: Math.max(1, Math.floor(workArea.height / scale) - 48),
+    };
+}
+
 const LoginHud = GObject.registerClass(
 class LoginHud extends St.Widget {
     _init() {
         super._init({
             style_class: 'login-hud-overlay',
-            layout_manager: new Clutter.BinLayout(),
+            layout_manager: new Clutter.FixedLayout(),
             reactive: false,
             x_expand: true,
             y_expand: true,
@@ -298,16 +432,27 @@ class LoginHud extends St.Widget {
         this._overallProgressFillId = 0;
         this._shutdownCountdown = null;
         this._handoffStarted = false;
+        this._selectedTab = 'startup';
+        this._alerts = null;
+        this._alertError = '';
+        this._gcProfiles = null;
+        this._gcError = '';
+        this._onAlertAckRequested = null;
 
+        this._viewport = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            x_align: Clutter.ActorAlign.START,
+            y_align: Clutter.ActorAlign.START,
+        });
+        this.add_child(this._viewport);
         this._panel = new St.BoxLayout({
             style_class: 'login-hud-panel',
             vertical: true,
             reactive: true,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
-            width: 650,
         });
-        this.add_child(this._panel);
+        this._viewport.add_child(this._panel);
 
         this._kicker = new St.Label({
             style_class: 'login-hud-kicker',
@@ -350,6 +495,7 @@ class LoginHud extends St.Widget {
             style_class: 'login-hud-rows',
             vertical: true,
         });
+        this._tabs = new St.BoxLayout({style_class: 'login-hud-tabs', visible: false});
         this._rowsScroll = new St.ScrollView({
             style_class: 'login-hud-rows-scroll',
             overlay_scrollbars: true,
@@ -371,14 +517,16 @@ class LoginHud extends St.Widget {
         this._panel.add_child(this._overallProgressLabel);
         this._panel.add_child(this._overallProgressTrack);
         this._panel.add_child(this._notice);
+        this._panel.add_child(this._tabs);
         this._panel.add_child(this._rowsScroll);
         this._panel.add_child(this._actions);
     }
 
-    setCallbacks(onCloseRequested, onOpenLogRequested, onCancelRequested) {
+    setCallbacks(onCloseRequested, onOpenLogRequested, onCancelRequested, onAlertAckRequested = null) {
         this._onCloseRequested = onCloseRequested;
         this._onOpenLogRequested = onOpenLogRequested;
         this._onCancelRequested = onCancelRequested;
+        this._onAlertAckRequested = onAlertAckRequested;
     }
 
     setStatus(status) {
@@ -407,7 +555,8 @@ class LoginHud extends St.Widget {
         this._overallProgress = overallFraction(status.stages);
         this._overallProgressLabel.text = `Overall progress ${Math.round(this._overallProgress * 100)}%`;
         this.scheduleProgressFill();
-        this._renderRows(status.stages);
+        this._renderTabs();
+        this._renderContent();
         this._renderActions(status);
         this._refreshElapsed();
         this._renderNotice();
@@ -459,10 +608,198 @@ class LoginHud extends St.Widget {
 
     resetExpansion() {
         this._expandedJobs.clear();
+        this._selectedTab = 'startup';
+    }
+
+    setAlerts(alerts, error = '') {
+        this._alerts = alerts;
+        this._alertError = error;
+        if (this._status?.mode !== 'startup')
+            return;
+        this._renderTabs();
+        if (this._selectedTab === 'important')
+            this._renderContent();
+    }
+
+    setGcProfiles(profiles, error = '') {
+        this._gcProfiles = profiles;
+        this._gcError = error;
+        if (this._status?.mode !== 'startup')
+            return;
+        this._renderTabs();
+        if (this._selectedTab === 'gc')
+            this._renderContent();
+    }
+
+    _renderTabs() {
+        this._tabs.destroy_all_children();
+        this._tabs.visible = this._status?.mode === 'startup';
+        if (!this._tabs.visible) {
+            this._selectedTab = 'startup';
+            return;
+        }
+        const count = this._alerts?.unread ?? 0;
+        for (const [tab, label] of [['startup', 'Відновлення'], ['important', `Важливе${count ? ` · ${count}` : ''}`], ['gc', 'GC-профілі']]) {
+            const button = new St.Button({
+                style_class: `login-hud-tab${this._selectedTab === tab ? ' login-hud-tab-selected' : ''}`,
+                label, reactive: true, can_focus: true, x_expand: true,
+            });
+            button.connect('clicked', () => {
+                this._selectedTab = tab;
+                this._renderTabs();
+                this._renderContent();
+            });
+            this._tabs.add_child(button);
+        }
+        this.scheduleProgressFill();
+    }
+
+    _renderContent() {
+        if (this._status?.mode === 'startup' && this._selectedTab === 'important')
+            this._renderAlerts();
+        else if (this._status?.mode === 'startup' && this._selectedTab === 'gc')
+            this._renderGcProfiles();
+        else if (this._status)
+            this._renderRows(this._status.stages);
+    }
+
+    _renderGcProfiles() {
+        this._rows.destroy_all_children();
+        this.scheduleProgressFill();
+        const addLabel = (parent, message, style = 'login-hud-row-message') => {
+            const label = new St.Label({style_class: style, text: message});
+            label.clutter_text.line_wrap = true;
+            label.clutter_text.ellipsize = 0;
+            parent.add_child(label);
+        };
+        if (!this._gcProfiles || this._gcError) {
+            addLabel(this._rows, this._gcError || 'Очікую звіт GC-профілів…', 'login-hud-alert-summary');
+            if (!this._gcProfiles)
+                return;
+        }
+        if (!this._gcProfiles.daemonAvailable)
+            addLabel(this._rows, this._gcProfiles.stale
+                ? 'Демон GC-профілів недоступний: звіт застарів.'
+                : 'Демон GC-профілів недоступний.', 'login-hud-alert-summary');
+        if (this._gcProfiles.truncated)
+            addLabel(this._rows, `Показано перші ${GC_MAX_PROFILES} профілів; решту приховано.`,
+                'login-hud-alert-summary');
+        if (!this._gcProfiles.profiles.length) {
+            addLabel(this._rows, 'Профілі GC не зареєстровані.', 'login-hud-alert-summary');
+            return;
+        }
+        for (const profile of this._gcProfiles.profiles) {
+            const presentation = gcProfilePresentation(profile, this._gcProfiles.daemonAvailable);
+            const row = new St.BoxLayout({vertical: true,
+                style_class: `login-hud-row login-hud-row-${presentation.style}`});
+            const heading = new St.BoxLayout({style_class: 'login-hud-row-heading'});
+            heading.add_child(new St.Icon({style_class: 'login-hud-row-icon',
+                icon_name: presentation.icon, icon_size: 16}));
+            heading.add_child(new St.Label({style_class: 'login-hud-row-name',
+                text: profile.name, x_expand: true}));
+            heading.add_child(new St.Label({style_class: 'login-hud-row-state',
+                text: presentation.label}));
+            row.add_child(heading);
+            if (presentation.timeLabel && presentation.time)
+                addLabel(row, `${presentation.timeLabel}: ${gcEventTime(presentation.time)}`);
+            if (profile.message)
+                addLabel(row, profile.message);
+            this._rows.add_child(row);
+        }
+    }
+
+    _renderAlerts() {
+        this._rows.destroy_all_children();
+        this.scheduleProgressFill();
+        const addLabel = (parent, message, style = 'login-hud-row-message') => {
+            const label = new St.Label({style_class: style, text: message});
+            label.clutter_text.line_wrap = true;
+            label.clutter_text.ellipsize = 0;
+            parent.add_child(label);
+        };
+        if (!this._alerts || this._alertError) {
+            addLabel(this._rows, this._alertError || 'Очікую перевірку власних систем…', 'login-hud-alert-summary');
+            if (!this._alerts)
+                return;
+        }
+        const alerts = this._alerts;
+        if (alerts.scanning || alerts.stale || alerts.scanError || alerts.incomplete)
+            addLabel(this._rows, 'Перевірка власних систем неповна; показано лише підтверджені важливі проблеми.', 'login-hud-alert-summary');
+        if (!alerts.incidents.length)
+            addLabel(this._rows, 'Підтверджених важливих проблем немає.', 'login-hud-alert-summary');
+        for (const incident of alerts.incidents) {
+            const source = alerts.sources.find(item => item.id === incident.source);
+            const row = new St.BoxLayout({vertical: true,
+                style_class: 'login-hud-row login-hud-row-failed'});
+            const key = `alert:${incident.source}:${incident.code}`;
+            const expanded = this._expandedJobs.has(key);
+            const button = new St.Button({
+                style_class: 'login-hud-row-heading-button', reactive: true, can_focus: true,
+                label: `${expanded ? '▾' : '▸'} ${source.label} · ${source.host} · ${incident.severity}`,
+            });
+            button.connect('clicked', () => {
+                if (expanded)
+                    this._expandedJobs.delete(key);
+                else
+                    this._expandedJobs.add(key);
+                this._renderContent();
+            });
+            row.add_child(button);
+            addLabel(row, incident.message);
+            if (expanded) {
+                addLabel(row, `Код: ${incident.code}\nВперше: ${incident.first_seen}\n` +
+                    `Востаннє: ${incident.last_seen}\nПовторень: ${incident.occurrences}\n` +
+                    `Стан: активна; рівень: ${incident.severity}\n` +
+                    `Власний код: ${source.source_ref}\n${incident.detail}`, 'login-hud-alert-details');
+            }
+            if (!incident.acknowledged) {
+                const ack = new St.Button({style_class: 'login-hud-tab', label: 'Переглянуто',
+                    reactive: true, can_focus: true, x_align: Clutter.ActorAlign.END});
+                ack.connect('clicked', () => this._onAlertAckRequested?.(incident.source, incident.code));
+                row.add_child(ack);
+            }
+            this._rows.add_child(row);
+        }
     }
 
     getInteractiveActor() {
         return this._panel;
+    }
+
+    setWorkArea(workArea, scaleFactor) {
+        this._workArea = workArea;
+        this._scaleFactor = scaleFactor;
+        this._viewport.set_position(workArea.x, workArea.y);
+        this._viewport.set_size(workArea.width, workArea.height);
+        this.scheduleProgressFill();
+    }
+
+    _updatePanelLayout() {
+        if (!this._workArea || !this._panel.get_stage())
+            return;
+        const bounds = hudBounds(this._workArea, this._scaleFactor);
+        const panelStyle = `width: ${bounds.width}px; max-width: ${bounds.width}px; ` +
+            `max-height: ${bounds.height}px;`;
+        if (this._panel.get_style() !== panelStyle)
+            this._panel.set_style(panelStyle);
+
+        // Reserve the real header, notice and action heights, not a fixed row
+        // cap. Expanded logs may scroll; the Close/Cancel controls stay outside.
+        const theme = this._panel.get_theme_node();
+        const innerWidth = theme.adjust_for_width(bounds.width * this._scaleFactor);
+        const children = this._panel.get_children().filter(child => child.visible);
+        let chromeHeight = theme.adjust_preferred_height(0, 0)[1] +
+            theme.get_length('spacing') * Math.max(0, children.length - 1);
+        for (const child of children) {
+            if (child !== this._rowsScroll)
+                chromeHeight += child.get_preferred_height(innerWidth)[1];
+        }
+        // Include the list's top margin in the available-height calculation.
+        const rowsHeight = Math.max(1, Math.floor(bounds.height -
+            chromeHeight / this._scaleFactor - 8));
+        const rowsStyle = `max-height: ${rowsHeight}px;`;
+        if (this._rowsScroll.get_style() !== rowsStyle)
+            this._rowsScroll.set_style(rowsStyle);
     }
 
     focusPrimaryAction() {
@@ -476,6 +813,14 @@ class LoginHud extends St.Widget {
 
     refreshClock() {
         this._refreshElapsed();
+        // A stopped collector emits no new file events. Age the displayed
+        // report anyway instead of leaving an old green result fresh forever.
+        if (this._alerts && !this._alerts.stale &&
+            Date.now() - Date.parse(this._alerts.updatedAt) > 15 * 60 * 1000) {
+            this._alerts.stale = true;
+            if (this._status?.mode === 'startup' && this._selectedTab === 'important')
+                this._renderContent();
+        }
     }
 
     scheduleProgressFill() {
@@ -483,6 +828,7 @@ class LoginHud extends St.Widget {
             return;
         this._overallProgressFillId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._overallProgressFillId = 0;
+            this._updatePanelLayout();
             this._updateOverallProgressFill();
             return GLib.SOURCE_REMOVE;
         });
@@ -508,9 +854,11 @@ class LoginHud extends St.Widget {
     _renderNotice() {
         this._notice.text = this._transportNotice;
         this._notice.visible = Boolean(this._transportNotice);
+        this.scheduleProgressFill();
     }
 
     _renderRows(stages) {
+        this.scheduleProgressFill();
         this._rows.destroy_all_children();
         if (stages.length === 0) {
             this._rows.add_child(new St.Label({
@@ -570,7 +918,7 @@ class LoginHud extends St.Widget {
             else
                 this._expandedJobs.add(stage.id);
             if (this._status)
-                this._renderRows(this._status.stages);
+                this._renderContent();
         });
         row.add_child(heading);
 
@@ -677,6 +1025,7 @@ class LoginHud extends St.Widget {
     }
 
     _renderActions(status) {
+        this.scheduleProgressFill();
         this._actions.destroy_all_children();
         this._primaryAction = null;
         const hasFailure = status.overallState === 'failed' || status.stages.some(stage => stage.state === 'failed');
@@ -754,6 +1103,16 @@ export default class LoginHudExtension extends Extension {
             runtimeDirectory, STATUS_DIRECTORY,
         ]));
         this._statusFile = this._statusDirectory.get_child(STATUS_FILENAME);
+        this._alertsFile = this._statusDirectory.get_child(ALERTS_FILENAME);
+        const stateHome = GLib.getenv('XDG_STATE_HOME') ||
+            GLib.build_filenamev([GLib.get_home_dir(), '.local', 'state']);
+        this._gcStatusDirectory = Gio.File.new_for_path(GLib.build_filenamev([
+            stateHome, 'gc-profiled',
+        ]));
+        this._gcStatusFile = this._gcStatusDirectory.get_child(GC_STATUS_FILENAME);
+        this._alertsSerial = 0;
+        this._gcSerial = 0;
+        this._gcRefreshId = 0;
         this._dismissedFile = this._statusDirectory.get_child(DISMISSED_FILENAME);
         this._cancelFile = this._statusDirectory.get_child(CANCEL_FILENAME);
         this._requestFile = this._statusDirectory.get_child(REQUEST_FILENAME);
@@ -810,7 +1169,8 @@ export default class LoginHudExtension extends Extension {
         this._hud.setCallbacks(
             () => this._dismissHud(),
             path => this._openErrorLog(path),
-            status => this._requestCancel(status)
+            status => this._requestCancel(status),
+            (source, code) => this._ackAlert(source, code)
         );
         this._hud.visible = false;
         this._hudKeyPressId = this._hud.connect('key-press-event', (_actor, event) => {
@@ -835,11 +1195,26 @@ export default class LoginHudExtension extends Extension {
                 const names = new Set([file?.get_basename(), otherFile?.get_basename()]);
                 if (names.has(STATUS_FILENAME))
                     this._scheduleLoad();
+                if (names.has(ALERTS_FILENAME) && this._lastGoodStatus?.mode === 'startup')
+                    this._loadAlerts();
                 if (names.has(PREPARED_FILENAME))
                     this._checkPreparedHandoff();
             });
         } catch (error) {
             this._hud.setTransportNotice(`Status directory is not available yet: ${error.message}`);
+        }
+
+        try {
+            this._gcMonitor = this._gcStatusDirectory.monitor_directory(
+                Gio.FileMonitorFlags.NONE, null
+            );
+            this._gcMonitorChangedId = this._gcMonitor.connect('changed', (_monitor, file, otherFile) => {
+                const names = new Set([file?.get_basename(), otherFile?.get_basename()]);
+                if (names.has(GC_STATUS_FILENAME) && this._lastGoodStatus?.mode === 'startup')
+                    this._loadGcProfiles();
+            });
+        } catch (_error) {
+            // The daemon creates this directory lazily.
         }
 
         this._resolveCurrentSessionId();
@@ -866,10 +1241,21 @@ export default class LoginHudExtension extends Extension {
         if (this._monitorChangedId)
             this._monitor?.disconnect(this._monitorChangedId);
         this._monitor?.cancel();
+        if (this._gcRefreshId)
+            GLib.Source.remove(this._gcRefreshId);
+        if (this._gcMonitorChangedId)
+            this._gcMonitor?.disconnect(this._gcMonitorChangedId);
+        this._gcMonitor?.cancel();
         if (this._stageSizeChangedId)
             global.stage.disconnect(this._stageSizeChangedId);
         if (this._stageHeightChangedId)
             global.stage.disconnect(this._stageHeightChangedId);
+        if (this._workAreasChangedId)
+            global.display.disconnect(this._workAreasChangedId);
+        if (this._monitorsChangedId)
+            Main.layoutManager.disconnect(this._monitorsChangedId);
+        if (this._scaleChangedId)
+            St.ThemeContext.get_for_stage(global.stage).disconnect(this._scaleChangedId);
         if (this._sessionModeUpdatedId)
             Main.sessionMode.disconnect(this._sessionModeUpdatedId);
         this._releaseModal();
@@ -889,15 +1275,28 @@ export default class LoginHudExtension extends Extension {
         this._shutdownCountdownId = 0;
         this._clockId = 0;
         this._monitorChangedId = 0;
+        this._gcRefreshId = 0;
+        this._gcMonitorChangedId = 0;
+        this._stageSizeChangedId = 0;
+        this._stageHeightChangedId = 0;
+        this._workAreasChangedId = 0;
+        this._monitorsChangedId = 0;
+        this._scaleChangedId = 0;
         this._sessionModeUpdatedId = 0;
         this._hudKeyPressId = 0;
         this._monitor = null;
+        this._gcMonitor = null;
         this._hud = null;
         this._chromeInstalled = false;
         this._panelChromeTracked = false;
         this._currentSessionId = null;
         this._sessionIdResolvePending = false;
         this._statusFile = null;
+        this._alertsFile = null;
+        this._gcStatusFile = null;
+        this._gcStatusDirectory = null;
+        this._alertsSerial++;
+        this._gcSerial++;
         this._dismissedFile = null;
         this._cancelFile = null;
         this._requestFile = null;
@@ -1243,6 +1642,13 @@ export default class LoginHudExtension extends Extension {
 
     _syncHudSize() {
         this._hud?.set_size(global.stage.width, global.stage.height);
+        const index = Main.layoutManager.primaryIndex;
+        if (index < 0 || !this._hud)
+            return;
+        this._hud.setWorkArea(
+            Main.layoutManager.getWorkAreaForMonitor(index),
+            St.ThemeContext.get_for_stage(global.stage).scale_factor
+        );
     }
 
     _startupCanAutoDismiss(status) {
@@ -1330,8 +1736,18 @@ export default class LoginHudExtension extends Extension {
         this._syncHudSize();
         this._stageSizeChangedId = global.stage.connect('notify::width', () => this._syncHudSize());
         this._stageHeightChangedId = global.stage.connect('notify::height', () => this._syncHudSize());
+        this._workAreasChangedId = global.display.connect('workareas-changed', () => this._syncHudSize());
+        this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => this._syncHudSize());
+        this._scaleChangedId = St.ThemeContext.get_for_stage(global.stage).connect(
+            'notify::scale-factor', () => this._syncHudSize()
+        );
         this._clockId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
             this._hud?.refreshClock();
+            return GLib.SOURCE_CONTINUE;
+        });
+        this._gcRefreshId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+            if (this._lastGoodStatus?.mode === 'startup')
+                this._loadGcProfiles();
             return GLib.SOURCE_CONTINUE;
         });
     }
@@ -1490,9 +1906,27 @@ export default class LoginHudExtension extends Extension {
         const hasFailure = status?.overallState === 'failed' ||
             status?.stages.some(stage => stage.state === 'failed');
         return status?.mode === 'shutdown' && !status.cancelled && !hasFailure &&
+            ['ready', 'degraded'].includes(status.overallState) &&
             status.operationId !== this._locallyCancelledOperationId &&
             status.stages.length > 0 &&
             status.stages.every(stage => TERMINAL_STATES.has(stage.state));
+    }
+
+    _shutdownHudVisible(status) {
+        const panel = this._hud?.getInteractiveActor();
+        return this._shutdownStatusReady(status) && this._hud?.visible && this._hud.mapped &&
+            panel?.mapped && panel.width > 0 && panel.height > 0 &&
+            !Main.sessionMode.isLocked && !Main.sessionMode.isGreeter;
+    }
+
+    _cancelUnseenShutdown(status) {
+        this._cancelShutdownCountdown();
+        const requested = this._requestCancel(status);
+        this._hud?.setTransportNotice(
+            requested
+                ? 'Shutdown cancellation requested because its final countdown was no longer visible. Prepared jobs are being restored.'
+                : 'Shutdown remains stopped: the countdown is not visible and cancellation could not be confirmed.'
+        );
     }
 
     _cancelShutdownCountdown() {
@@ -1537,6 +1971,10 @@ export default class LoginHudExtension extends Extension {
                     if (!this._hud || this._activeOperationId !== operationId ||
                         !this._shutdownStatusReady(this._lastGoodStatus))
                         return false;
+                    if (!this._shutdownHudVisible(this._lastGoodStatus)) {
+                        this._renderAckScheduledOperationId = null;
+                        return false;
+                    }
                     try {
                         this._writeProtocolFile(this._renderedFile, 'shutdown-hud-rendered', {
                             schema_version: 1,
@@ -1579,6 +2017,11 @@ export default class LoginHudExtension extends Extension {
                 if (!this._hud || this._shutdownCountdownOperationId !== operationId ||
                     !this._shutdownStatusReady(this._lastGoodStatus))
                     return false;
+                if (!this._shutdownHudVisible(this._lastGoodStatus)) {
+                    this._cancelUnseenShutdown(this._lastGoodStatus);
+                    return false;
+                }
+                console.info(`Login HUD: visible ${SHUTDOWN_COUNTDOWN_SECONDS}s countdown; operation=${operationId}`);
                 const began = GLib.get_monotonic_time();
                 this._shutdownCountdownId = GLib.timeout_add(
                     GLib.PRIORITY_DEFAULT,
@@ -1589,6 +2032,10 @@ export default class LoginHudExtension extends Extension {
                             this._shutdownCountdownId = 0;
                             this._shutdownCountdownOperationId = null;
                             this._shutdownCountdownSeconds = 0;
+                            return GLib.SOURCE_REMOVE;
+                        }
+                        if (!this._shutdownHudVisible(this._lastGoodStatus)) {
+                            this._cancelUnseenShutdown(this._lastGoodStatus);
                             return GLib.SOURCE_REMOVE;
                         }
                         const elapsed = (GLib.get_monotonic_time() - began) / 1000000;
@@ -1618,6 +2065,10 @@ export default class LoginHudExtension extends Extension {
         if (!this._shutdownStatusReady(status) ||
             this._commitWrittenOperationId === status.operationId)
             return;
+        if (!this._shutdownHudVisible(status)) {
+            this._cancelUnseenShutdown(status);
+            return;
+        }
         try {
             this._writeProtocolFile(this._commitFile, 'shutdown-commit', {
                 schema_version: 1,
@@ -1731,6 +2182,11 @@ export default class LoginHudExtension extends Extension {
         if (!this._shutdownStatusReady(status) || this._nativeHandoffOperationId ||
             this._commitWrittenOperationId !== status.operationId)
             return;
+        if (!this._shutdownHudVisible(this._lastGoodStatus) ||
+            this._lastGoodStatus?.operationId !== status.operationId) {
+            this._cancelUnseenShutdown(this._lastGoodStatus);
+            return;
+        }
         const signal = this._preflightOperationId === status.operationId
             ? this._preflightSignal
             : status.shutdownAction === 'restart'
@@ -1744,6 +2200,7 @@ export default class LoginHudExtension extends Extension {
         }
 
         this._nativeHandoffOperationId = status.operationId;
+        console.info(`Login HUD: completed visible countdown, handing off ${status.shutdownAction}; operation=${status.operationId}`);
         this._stopPreparedPolling();
         this._hud.setHandoffStarted(status.shutdownAction || this._preflightAction);
         this._confirmBypass = true;
@@ -1957,6 +2414,10 @@ export default class LoginHudExtension extends Extension {
                         : parsed.shutdownAction === 'poweroff' ? 'ConfirmedShutdown' : null;
                 }
                 this._lastGoodStatus = parsed;
+                if (parsed.mode === 'startup')
+                    this._loadAlerts();
+                if (parsed.mode === 'startup')
+                    this._loadGcProfiles();
                 const eligible = parsed.mode === 'shutdown' || parsed.showOnStartup;
                 if (eligible) {
                     this._installHudChrome();
@@ -1987,6 +2448,100 @@ export default class LoginHudExtension extends Extension {
                 this._hud.setTransportNotice(`Waiting for a valid status update: ${error.message}`);
             }
         });
+    }
+
+    _loadAlerts() {
+        if (!this._hud || !this._alertsFile || this._lastGoodStatus?.mode !== 'startup')
+            return;
+        const serial = ++this._alertsSerial;
+        const file = this._alertsFile;
+        file.query_info_async('standard::size,standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
+            GLib.PRIORITY_DEFAULT, null, (_file, result) => {
+                if (!this._hud || serial !== this._alertsSerial)
+                    return;
+                try {
+                    const info = file.query_info_finish(result);
+                    if (info.get_file_type() !== Gio.FileType.REGULAR || info.get_size() > 2 * 1024 * 1024)
+                        throw new Error('Invalid owned-system report file');
+                    file.load_contents_async(null, (_source, contents) => {
+                        if (!this._hud || serial !== this._alertsSerial || this._lastGoodStatus?.mode !== 'startup')
+                            return;
+                        try {
+                            const [, bytes] = file.load_contents_finish(contents);
+                            this._hud.setAlerts(normalizeAlerts(JSON.parse(new TextDecoder().decode(bytes))));
+                        } catch {
+                            this._hud.setAlerts(null, 'Звіт власних систем недоступний або пошкоджений; це не означає, що все справне.');
+                        }
+                    });
+                } catch {
+                    this._hud.setAlerts(null, 'Очікую звіт власних систем. Перевірка: wsctl alerts scan');
+                }
+            });
+    }
+
+    _loadGcProfiles() {
+        if (!this._hud || !this._gcStatusFile || this._lastGoodStatus?.mode !== 'startup')
+            return;
+        const serial = ++this._gcSerial;
+        const file = this._gcStatusFile;
+        file.query_info_async('standard::size,standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
+            GLib.PRIORITY_DEFAULT, null, (_file, result) => {
+            if (!this._hud || serial !== this._gcSerial || this._lastGoodStatus?.mode !== 'startup')
+                return;
+            try {
+                const info = file.query_info_finish(result);
+                if (info.get_file_type() !== Gio.FileType.REGULAR || info.get_size() > GC_MAX_STATUS_BYTES)
+                    throw new Error('Invalid GC profile status file');
+                file.load_contents_async(null, (_source, contents) => {
+                    if (!this._hud || serial !== this._gcSerial || this._lastGoodStatus?.mode !== 'startup')
+                        return;
+                    try {
+                        const [, bytes] = file.load_contents_finish(contents);
+                        if (bytes.length > GC_MAX_STATUS_BYTES)
+                            throw new Error('Invalid GC profile status file');
+                        this._hud.setGcProfiles(normalizeGcProfiles(
+                            JSON.parse(new TextDecoder().decode(bytes))
+                        ));
+                    } catch (error) {
+                        if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                            this._hud.setGcProfiles(null, 'Звіт GC-профілів ще недоступний.');
+                        else
+                            this._hud.setGcProfiles(null,
+                                'Звіт GC-профілів недоступний або пошкоджений; це не означає, що все справне.');
+                    }
+                });
+            } catch (error) {
+                if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                    this._hud.setGcProfiles(null, 'Звіт GC-профілів ще недоступний.');
+                else
+                    this._hud.setGcProfiles(null,
+                        'Звіт GC-профілів недоступний або пошкоджений; це не означає, що все справне.');
+            }
+        });
+    }
+
+    _ackAlert(source, code) {
+        if (this._lastGoodStatus?.mode !== 'startup' ||
+            !/^[a-z0-9][a-z0-9_.-]{0,79}$/.test(source) || !/^[a-z0-9][a-z0-9_.-]{0,79}$/.test(code))
+            return;
+        try {
+            const process = Gio.Subprocess.new([
+                GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'wsctl']),
+                'alerts', 'ack', source, code,
+            ], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            process.wait_check_async(null, (_process, result) => {
+                if (!this._hud)
+                    return;
+                try {
+                    process.wait_check_finish(result);
+                    this._loadAlerts();
+                } catch {
+                    this._hud.setTransportNotice('Не вдалося позначити повідомлення переглянутим.');
+                }
+            });
+        } catch {
+            this._hud?.setTransportNotice('Команда wsctl alerts недоступна.');
+        }
     }
 
     _requestCancel(status) {

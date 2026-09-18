@@ -3,10 +3,10 @@
 }
 
 .login-hud-panel {
-    width: 650px;
-    max-width: 650px;
-    padding: 30px 34px 26px;
-    spacing: 10px;
+    width: 900px;
+    max-width: 900px;
+    padding: 24px 30px;
+    spacing: 8px;
     border: 1px solid rgba(70, 239, 226, 0.38);
     border-radius: 10px;
     background-color: rgba(10, 17, 29, 0.94);
@@ -68,8 +68,42 @@
 }
 
 .login-hud-rows-scroll {
-    max-height: 520px;
     margin-top: 8px;
+}
+
+.login-hud-tabs {
+    spacing: 8px;
+}
+
+.login-hud-tab {
+    padding: 5px 12px;
+    border: 1px solid rgba(127, 158, 183, 0.3);
+    border-radius: 5px;
+    background-color: rgba(70, 93, 115, 0.13);
+    color: #afc5d3;
+    font-size: 10pt;
+}
+
+.login-hud-tab-selected,
+.login-hud-tab:hover,
+.login-hud-tab:focus {
+    border-color: rgba(72, 223, 209, 0.65);
+    background-color: rgba(72, 223, 209, 0.16);
+    color: #d5fff8;
+}
+
+.login-hud-alert-summary {
+    padding: 6px 4px;
+    color: #afc5d3;
+    font-size: 10pt;
+}
+
+.login-hud-alert-details {
+    padding: 8px 10px;
+    border-left: 1px solid rgba(72, 223, 209, 0.34);
+    background-color: rgba(2, 8, 15, 0.46);
+    color: #afc5d3;
+    font-size: 9pt;
 }
 
 .login-hud-rows {
@@ -125,6 +159,20 @@
     font-size: 10pt;
 }
 
+.login-hud-row-ok .login-hud-row-icon {
+    color: #72e8a3;
+}
+
+.login-hud-row-failed .login-hud-row-icon {
+    color: #ff807f;
+}
+
+.login-hud-row-disabled .login-hud-row-icon,
+.login-hud-row-pending .login-hud-row-icon,
+.login-hud-row-running .login-hud-row-icon {
+    color: #a9bdcb;
+}
+
 .login-hud-row-message {
     margin-left: 44px;
     color: #a9bdcb;
@@ -133,7 +181,7 @@
 
 .login-hud-progress-track {
     margin: 4px 4px 0 44px;
-    min-width: 510px;
+    min-width: 0;
     height: 5px;
     border-radius: 3px;
     background-color: rgba(126, 164, 188, 0.25);
