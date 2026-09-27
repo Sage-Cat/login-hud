@@ -5,7 +5,7 @@ VERSION := $(shell jq -r .version metadata.json)
 DIST_DIR ?= dist
 ARCHIVE := $(DIST_DIR)/$(UUID).shell-extension.zip
 CHECKSUM := $(ARCHIVE).sha256
-FILES := metadata.json extension.js stylesheet.css
+FILES := metadata.json extension.js buildInfo.js stylesheet.css
 ESLINT := $(if $(wildcard node_modules/.bin/eslint),node_modules/.bin/eslint,eslint)
 
 .PHONY: all check test install uninstall package release-artifacts verify-package clean
@@ -23,7 +23,7 @@ check:
 	@$(ESLINT) extension.js
 	@shellcheck scripts/*.sh tests/check.sh
 	@node tests/lifecycle-static.mjs
-	@node --test tests/layout.mjs tests/alerts.mjs tests/gc-profiles.mjs tests/shutdown-visibility.mjs
+	@node --test tests/layout.mjs tests/alerts.mjs tests/gc-profiles.mjs tests/shutdown-visibility.mjs tests/enable-lifecycle.mjs
 	@echo "check: metadata, JavaScript syntax, and ESLint passed"
 
 test: check
@@ -37,7 +37,7 @@ uninstall:
 package: check
 	@command -v gnome-extensions >/dev/null || { echo "package: gnome-extensions is required" >&2; exit 1; }
 	@mkdir -p "$(DIST_DIR)"
-	@gnome-extensions pack --force --out-dir "$(DIST_DIR)" .
+	@gnome-extensions pack --force --extra-source=buildInfo.js --out-dir "$(DIST_DIR)" .
 	@./scripts/verify-package.sh "$(ARCHIVE)"
 	@echo "package: wrote $(ARCHIVE) (version $(VERSION))"
 

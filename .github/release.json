@@ -1,0 +1,14 @@
+{
+  "name": "login-hud",
+  "extensions": [
+    {
+      "directory": ".",
+      "files": [
+        "metadata.json",
+        "extension.js",
+        "buildInfo.js",
+        "stylesheet.css"
+      ]
+    }
+  ]
+}

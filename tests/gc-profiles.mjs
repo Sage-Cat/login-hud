@@ -109,3 +109,28 @@ test('stale daemon is visibly warned while profile rows remain passive', () => {
     assert.match(ui._rows.children[0].text, /застарів/);
     assert.equal(typeof ui._onCloseRequested, 'undefined');
 });
+
+test('hidden GC updates cache data without touching tabs or rows and reveal uses latest', () => {
+    const ui = hud(); ui.visible = false;
+    let renders = 0; ui._renderContent = () => { renders++; };
+    ui._renderTabs = () => assert.fail('GC data does not change tabs');
+    const changed = normalizeGcProfiles(payload({profiles: [{...profile, state: 'running'}]}), Date.parse(now));
+    ui.setGcProfiles(changed);
+    assert.equal(renders, 0); assert.equal(ui._gcProfiles.profiles[0].state, 'running');
+    ui.visible = true; ui.refreshVisibleGc(); assert.equal(renders, 1);
+});
+
+test('GC heartbeat changes do not rebuild visible rows, errors and stale state do', () => {
+    const ui = hud(); ui.visible = true;
+    let renders = 0; ui._renderContent = () => { renders++; };
+    ui._renderTabs = () => assert.fail('unexpected tab rebuild');
+    ui.setGcProfiles({...ui._gcProfiles, updatedAt: '2026-09-18T10:00:02Z', daemon: {pid: 456}});
+    assert.equal(renders, 0);
+    ui.setGcProfiles({...ui._gcProfiles, stale: true, daemonAvailable: false});
+    assert.equal(renders, 1);
+    ui.setGcProfiles(null, 'missing'); assert.equal(renders, 2);
+    ui.setGcProfiles(null, 'missing'); assert.equal(renders, 2);
+    ui._selectedTab = 'startup';
+    ui.setGcProfiles(normalizeGcProfiles(payload(), Date.parse(now))); assert.equal(renders, 2);
+    ui._selectedTab = 'gc'; ui._renderContent(); assert.equal(renders, 3);
+});

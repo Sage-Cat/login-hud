@@ -12,6 +12,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {Spinner} from 'resource:///org/gnome/shell/ui/animation.js';
 import {State as ModalDialogState} from 'resource:///org/gnome/shell/ui/modalDialog.js';
+import {BUILD_REVISION} from './buildInfo.js';
 
 const STATUS_DIRECTORY = 'workspace-state';
 const STATUS_FILENAME = 'login-hud-status.json';
@@ -127,6 +128,34 @@ function groupStages(stages) {
     return jobs;
 }
 
+function operationContext(raw, mode, operationId) {
+    if (raw === undefined)
+        return null; // Old status remains presentation-only during upgrades.
+    const fields = ['boot_id', 'login_generation', 'operation_id', 'mode', 'attempt', 'deadline'];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
+        Object.keys(raw).length !== fields.length || fields.some(field => !(field in raw)) ||
+        ['boot_id', 'login_generation', 'operation_id'].some(field =>
+            typeof raw[field] !== 'string' || !raw[field]) ||
+        raw.mode !== mode || (operationId && raw.operation_id !== operationId) ||
+        !Number.isInteger(raw.attempt) || raw.attempt < 1 ||
+        !Number.isFinite(raw.deadline) || raw.deadline <= 0)
+        throw new Error('Invalid operation context.');
+    return Object.freeze(Object.fromEntries(fields.map(field => [field, raw[field]])));
+}
+
+function sameOperationContext(left, right) {
+    return Boolean(left && right) && Object.keys(left).length === 6 &&
+        Object.keys(right).length === 6 && ['boot_id', 'login_generation', 'operation_id',
+        'mode', 'attempt', 'deadline'].every(field => left[field] === right[field]);
+}
+
+function gcViewKey(profiles, error) {
+    return JSON.stringify({error, data: profiles ? {
+        profiles: profiles.profiles, stale: profiles.stale, truncated: profiles.truncated,
+        daemonAvailable: profiles.daemonAvailable,
+    } : null});
+}
+
 function normaliseStatus(raw) {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
         throw new Error('The status document must be a JSON object.');
@@ -218,6 +247,7 @@ function normaliseStatus(raw) {
         stages: jobs,
         mode,
         operationId,
+        operationContext: operationContext(raw.operation_context, mode, operationId),
         shutdownAction,
         shutdownOrigin,
         shutdownActionExplicit: raw.shutdown_action !== undefined,
@@ -622,12 +652,15 @@ class LoginHud extends St.Widget {
     }
 
     setGcProfiles(profiles, error = '') {
+        const changed = gcViewKey(this._gcProfiles, this._gcError) !== gcViewKey(profiles, error);
         this._gcProfiles = profiles;
         this._gcError = error;
-        if (this._status?.mode !== 'startup')
-            return;
-        this._renderTabs();
-        if (this._selectedTab === 'gc')
+        if (changed)
+            this.refreshVisibleGc();
+    }
+
+    refreshVisibleGc() {
+        if (this.visible && this._status?.mode === 'startup' && this._selectedTab === 'gc')
             this._renderContent();
     }
 
@@ -1091,6 +1124,39 @@ class LoginHud extends St.Widget {
 
 export default class LoginHudExtension extends Extension {
     enable() {
+        this._enableEpoch = {};
+        this._cancellable = new Gio.Cancellable();
+        // Keep local withdrawal across Shell's disable/re-enable reordering.
+        this._cancelledOperations ??= new Set();
+        try {
+            const [, boot] = GLib.file_get_contents('/proc/sys/kernel/random/boot_id');
+            this._bootId = new TextDecoder().decode(boot).trim();
+            this._enable();
+            if (this._legacyPassive)
+                return;
+            this._diagnostics = Gio.DBusExportedObject.wrapJSObject(
+                '<node><interface name="org.sagecat.LoginHud"><method name="GetState"><arg type="s" direction="out"/></method></interface></node>', {
+                    GetState: () => JSON.stringify({build: {
+                        uuid: this.uuid, version: this.metadata.version, revision: BUILD_REVISION,
+                        sourceIdentityKnown: BUILD_REVISION !== 'development',
+                    }, visible: Boolean(this._hud?.visible), modal: Boolean(this._modalGrab),
+                    operation_context: this._lastGoodStatus?.operationContext ?? null,
+                    local_cancelled: this._isLocallyCancelled(this._lastGoodStatus),
+                    recovery_pending: this._isLocallyCancelled(this._lastGoodStatus) && !this._lastGoodStatus?.cancelled,
+                    cancel_request_written: Boolean(this._cancelRequestPending)}),
+                });
+            this._diagnostics.export(Gio.DBus.session, '/org/sagecat/LoginHud');
+        } catch (error) {
+            this.disable();
+            throw error;
+        }
+    }
+
+    _ownsEpoch(epoch) {
+        return epoch === this._enableEpoch && Boolean(this._hud);
+    }
+
+    _enable() {
         // One session may retain the old UUID's JavaScript module in memory
         // after an in-place update on Wayland. Keep that UUID as a passive
         // migration alias on future logins; the v2 UUID owns all HUD work.
@@ -1221,53 +1287,68 @@ export default class LoginHudExtension extends Extension {
         this._installEndSessionInterceptor();
     }
 
+    _cleanup(action) {
+        try {
+            action();
+        } catch (error) {
+            console.warn(`Login HUD cleanup failed: ${error.message}`);
+        }
+    }
+
     disable() {
+        this._enableEpoch = null;
+        this._cleanup(() => this._cancellable?.cancel());
+        this._cancellable = null;
+        this._cleanup(() => this._nativeCloseCancel?.());
+        this._nativeCloseCancel = null;
+        this._cleanup(() => this._diagnostics?.unexport());
+        this._diagnostics = null;
         if (this._legacyPassive) {
             this._legacyPassive = false;
             return;
         }
         if (this._reloadTimeout)
-            GLib.Source.remove(this._reloadTimeout);
+            this._cleanup(() => GLib.Source.remove(this._reloadTimeout));
         if (this._sessionIdRetryId)
-            GLib.Source.remove(this._sessionIdRetryId);
+            this._cleanup(() => GLib.Source.remove(this._sessionIdRetryId));
         if (this._preflightWatchdogId)
-            GLib.Source.remove(this._preflightWatchdogId);
-        this._stopPreparedPolling();
-        this._cancelShutdownCountdown();
-        this._abortActivePreflightOnDisable();
-        this._restoreEndSessionInterceptor();
+            this._cleanup(() => GLib.Source.remove(this._preflightWatchdogId));
+        this._cleanup(() => this._stopPreparedPolling());
+        this._cleanup(() => this._cancelShutdownCountdown());
+        this._cleanup(() => this._abortActivePreflightOnDisable());
+        this._cleanup(() => this._restoreEndSessionInterceptor());
         if (this._clockId)
-            GLib.Source.remove(this._clockId);
+            this._cleanup(() => GLib.Source.remove(this._clockId));
         if (this._monitorChangedId)
-            this._monitor?.disconnect(this._monitorChangedId);
-        this._monitor?.cancel();
+            this._cleanup(() => this._monitor?.disconnect(this._monitorChangedId));
+        this._cleanup(() => this._monitor?.cancel());
         if (this._gcRefreshId)
-            GLib.Source.remove(this._gcRefreshId);
+            this._cleanup(() => GLib.Source.remove(this._gcRefreshId));
         if (this._gcMonitorChangedId)
-            this._gcMonitor?.disconnect(this._gcMonitorChangedId);
-        this._gcMonitor?.cancel();
+            this._cleanup(() => this._gcMonitor?.disconnect(this._gcMonitorChangedId));
+        this._cleanup(() => this._gcMonitor?.cancel());
         if (this._stageSizeChangedId)
-            global.stage.disconnect(this._stageSizeChangedId);
+            this._cleanup(() => global.stage.disconnect(this._stageSizeChangedId));
         if (this._stageHeightChangedId)
-            global.stage.disconnect(this._stageHeightChangedId);
+            this._cleanup(() => global.stage.disconnect(this._stageHeightChangedId));
         if (this._workAreasChangedId)
-            global.display.disconnect(this._workAreasChangedId);
+            this._cleanup(() => global.display.disconnect(this._workAreasChangedId));
         if (this._monitorsChangedId)
-            Main.layoutManager.disconnect(this._monitorsChangedId);
+            this._cleanup(() => Main.layoutManager.disconnect(this._monitorsChangedId));
         if (this._scaleChangedId)
-            St.ThemeContext.get_for_stage(global.stage).disconnect(this._scaleChangedId);
+            this._cleanup(() => St.ThemeContext.get_for_stage(global.stage).disconnect(this._scaleChangedId));
         if (this._sessionModeUpdatedId)
-            Main.sessionMode.disconnect(this._sessionModeUpdatedId);
+            this._cleanup(() => Main.sessionMode.disconnect(this._sessionModeUpdatedId));
         this._releaseModal();
         if (this._hud) {
-            this._hud.cancelDeferredUpdates();
+            this._cleanup(() => this._hud.cancelDeferredUpdates());
             if (this._hudKeyPressId)
-                this._hud.disconnect(this._hudKeyPressId);
+                this._cleanup(() => this._hud.disconnect(this._hudKeyPressId));
             if (this._panelChromeTracked)
-                Main.layoutManager.untrackChrome(this._hud.getInteractiveActor());
+                this._cleanup(() => Main.layoutManager.untrackChrome(this._hud.getInteractiveActor()));
             if (this._chromeInstalled)
-                Main.layoutManager.removeChrome(this._hud);
-            this._hud.destroy();
+                this._cleanup(() => Main.layoutManager.removeChrome(this._hud));
+            this._cleanup(() => this._hud.destroy());
         }
 
         this._reloadTimeout = 0;
@@ -1457,6 +1538,7 @@ export default class LoginHudExtension extends Extension {
                 if (settled)
                     return;
                 settled = true;
+                this._nativeCloseCancel = null;
                 if (closedId) {
                     dialog.disconnect(closedId);
                     closedId = 0;
@@ -1470,6 +1552,7 @@ export default class LoginHudExtension extends Extension {
                 else
                     resolve();
             };
+            this._nativeCloseCancel = () => finish(new Error('HUD disabled while closing confirmation'));
             closedId = dialog.connect('closed', () => finish());
             timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
                 timeoutId = 0;
@@ -1512,6 +1595,7 @@ export default class LoginHudExtension extends Extension {
             (this._preflightOperationId && !this._nativeHandoffOperationId))
             return;
 
+        const epoch = this._enableEpoch;
         this._preflightStarting = true;
         const sessionId = this._resolveCurrentSessionIdSync();
         const operationId = GLib.uuid_string_random().replaceAll('-', '');
@@ -1523,6 +1607,8 @@ export default class LoginHudExtension extends Extension {
             // open, so wait for that modal to be fully gone before publishing
             // any request that can make the HUD visible.
             await this._closeNativeDialogBeforePreflight();
+            if (!this._ownsEpoch(epoch))
+                return;
             this._writeProtocolFile(this._requestFile, 'shutdown-request', {
                 schema_version: 1,
                 operation_id: operationId,
@@ -1540,6 +1626,8 @@ export default class LoginHudExtension extends Extension {
             this._commitWrittenOperationId = null;
             this._cancelShutdownCountdown();
         } catch (error) {
+            if (!this._ownsEpoch(epoch))
+                return;
             console.error(`Login HUD could not start shutdown preflight: ${error.message}`);
             if (this._preflightOperationId === operationId) {
                 try {
@@ -1568,7 +1656,8 @@ export default class LoginHudExtension extends Extension {
             // cancel it on startup failure so GNOME does not remain wedged.
             this._cancelNativeEndSessionOnce(operationId);
         } finally {
-            this._preflightStarting = false;
+            if (this._ownsEpoch(epoch))
+                this._preflightStarting = false;
         }
     }
 
@@ -1726,12 +1815,12 @@ export default class LoginHudExtension extends Extension {
             trackFullscreen: false,
             affectsInputRegion: false,
         });
+        this._chromeInstalled = true;
         Main.layoutManager.trackChrome(this._hud.getInteractiveActor(), {
             affectsStruts: false,
             trackFullscreen: false,
             affectsInputRegion: true,
         });
-        this._chromeInstalled = true;
         this._panelChromeTracked = true;
         this._syncHudSize();
         this._stageSizeChangedId = global.stage.connect('notify::width', () => this._syncHudSize());
@@ -1742,7 +1831,10 @@ export default class LoginHudExtension extends Extension {
             'notify::scale-factor', () => this._syncHudSize()
         );
         this._clockId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
-            this._hud?.refreshClock();
+            if (this._hud?.visible)
+                this._hud.refreshClock();
+            if (this._modalGrab && !this._hasShutdownAuthority(this._lastGoodStatus))
+                this._releaseModal();
             return GLib.SOURCE_CONTINUE;
         });
         this._gcRefreshId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
@@ -1768,8 +1860,11 @@ export default class LoginHudExtension extends Extension {
             !atSessionBoundary;
         if (!visible)
             this._releaseModal();
+        const becameVisible = visible && !this._hud.visible;
         this._hud.visible = visible;
         if (visible) {
+            if (becameVisible)
+                this._hud.refreshVisibleGc();
             this._hud.scheduleProgressFill();
             this._syncModal();
             this._scheduleRenderedShutdownAck(this._lastGoodStatus);
@@ -1781,7 +1876,7 @@ export default class LoginHudExtension extends Extension {
         const hasFailure = status?.overallState === 'failed' ||
             status?.stages.some(stage => stage.state === 'failed');
         const shouldBeModal = this._hud?.visible && status?.mode === 'shutdown' &&
-            !status.cancelled && !hasFailure;
+            !status.cancelled && !hasFailure && this._hasShutdownAuthority(status);
         if (!shouldBeModal) {
             this._releaseModal();
             return;
@@ -1809,8 +1904,13 @@ export default class LoginHudExtension extends Extension {
 
     _releaseModal() {
         if (this._modalGrab) {
-            Main.popModal(this._modalGrab);
+            const grab = this._modalGrab;
             this._modalGrab = null;
+            try {
+                Main.popModal(grab);
+            } catch (error) {
+                console.warn(`Login HUD modal cleanup failed: ${error.message}`);
+            }
         }
         if (this._hud)
             this._hud.reactive = false;
@@ -1843,6 +1943,7 @@ export default class LoginHudExtension extends Extension {
     _resolveCurrentSessionId() {
         if (!this._hud || this._currentSessionId || this._sessionIdResolvePending)
             return;
+        const epoch = this._enableEpoch;
         this._sessionIdResolvePending = true;
         Gio.DBus.session.call(
             DBUS_NAME,
@@ -1853,9 +1954,9 @@ export default class LoginHudExtension extends Extension {
             new GLib.VariantType('(s)'),
             Gio.DBusCallFlags.NONE,
             2000,
-            null,
+            this._cancellable,
             (connection, result) => {
-                if (!this._hud)
+                if (!this._ownsEpoch(epoch))
                     return;
                 this._sessionIdResolvePending = false;
                 try {
@@ -1902,10 +2003,39 @@ export default class LoginHudExtension extends Extension {
         this._startPreflightWatchdog(request.operation_id, request.session_id);
     }
 
+    _isLocallyCancelled(status) {
+        return Boolean(status?.operationId) && (status.operationId === this._locallyCancelledOperationId ||
+            this._cancelledOperations?.has(`${status.sessionId}:${status.operationId}`) === true);
+    }
+
+    _isCurrentOperation(status) {
+        return status?.operationId === this._lastGoodStatus?.operationId &&
+            sameOperationContext(status?.operationContext, this._lastGoodStatus?.operationContext);
+    }
+
+    _hasShutdownAuthority(status) {
+        const context = status?.operationContext;
+        return Boolean(context) && context.mode === 'shutdown' &&
+            context.boot_id === this._bootId && context.login_generation === this._currentSessionId &&
+            context.operation_id === status.operationId &&
+            context.deadline > GLib.get_monotonic_time() / 1000000 &&
+            !this._isLocallyCancelled(status);
+    }
+
+    _withdrawShutdownAuthority(status) {
+        this._locallyCancelledOperationId = status.operationId;
+        this._cancelledOperations ??= new Set();
+        this._cancelledOperations.add(`${status.sessionId}:${status.operationId}`);
+        this._cancelShutdownCountdown();
+        this._stopPreparedPolling();
+        this._releaseModal();
+    }
+
     _shutdownStatusReady(status) {
         const hasFailure = status?.overallState === 'failed' ||
             status?.stages.some(stage => stage.state === 'failed');
         return status?.mode === 'shutdown' && !status.cancelled && !hasFailure &&
+            this._hasShutdownAuthority(status) &&
             ['ready', 'degraded'].includes(status.overallState) &&
             status.operationId !== this._locallyCancelledOperationId &&
             status.stages.length > 0 &&
@@ -1939,18 +2069,25 @@ export default class LoginHudExtension extends Extension {
 
     _scheduleRenderedShutdownAck(status) {
         if (!this._shutdownStatusReady(status)) {
-            if (status?.operationId === this._shutdownCountdownOperationId)
+            if (status?.operationId === this._shutdownCountdownOperationId) {
                 this._cancelShutdownCountdown();
+                this._renderAckWrittenOperationId = null;
+            }
+            if (status?.operationId === this._renderAckScheduledOperationId)
+                this._renderAckScheduledOperationId = null;
             return;
         }
         if (!this._hud?.visible || status.operationId === this._renderAckWrittenOperationId ||
             status.operationId === this._renderAckScheduledOperationId)
             return;
 
+        const epoch = this._enableEpoch;
         const operationId = status.operationId;
         this._renderAckScheduledOperationId = operationId;
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
-            if (!this._hud || this._activeOperationId !== operationId ||
+            if (!this._ownsEpoch(epoch) || !this._isCurrentOperation(status))
+                return GLib.SOURCE_REMOVE;
+            if (this._activeOperationId !== operationId ||
                 !this._shutdownStatusReady(this._lastGoodStatus)) {
                 if (this._renderAckScheduledOperationId === operationId)
                     this._renderAckScheduledOperationId = null;
@@ -1968,9 +2105,14 @@ export default class LoginHudExtension extends Extension {
             Clutter.threads_add_repaint_func_full(
                 Clutter.RepaintFlags.POST_PAINT,
                 () => {
-                    if (!this._hud || this._activeOperationId !== operationId ||
-                        !this._shutdownStatusReady(this._lastGoodStatus))
+                    if (!this._ownsEpoch(epoch) || !this._isCurrentOperation(status))
                         return false;
+                    if (this._activeOperationId !== operationId ||
+                        !this._shutdownStatusReady(this._lastGoodStatus)) {
+                        if (this._renderAckScheduledOperationId === operationId)
+                            this._renderAckScheduledOperationId = null;
+                        return false;
+                    }
                     if (!this._shutdownHudVisible(this._lastGoodStatus)) {
                         this._renderAckScheduledOperationId = null;
                         return false;
@@ -1980,6 +2122,7 @@ export default class LoginHudExtension extends Extension {
                             schema_version: 1,
                             operation_id: operationId,
                             session_id: this._lastGoodStatus.sessionId,
+                            operation_context: this._lastGoodStatus.operationContext,
                             rendered_at: new Date().toISOString(),
                         });
                         this._renderAckWrittenOperationId = operationId;
@@ -2002,6 +2145,7 @@ export default class LoginHudExtension extends Extension {
             this._shutdownCountdownOperationId === status.operationId ||
             this._commitWrittenOperationId === status.operationId)
             return;
+        const epoch = this._enableEpoch;
         const operationId = status.operationId;
         const action = status.shutdownAction ||
             (this._preflightOperationId === operationId ? this._preflightAction : null);
@@ -2014,7 +2158,7 @@ export default class LoginHudExtension extends Extension {
         Clutter.threads_add_repaint_func_full(
             Clutter.RepaintFlags.POST_PAINT,
             () => {
-                if (!this._hud || this._shutdownCountdownOperationId !== operationId ||
+                if (!this._ownsEpoch(epoch) || !this._isCurrentOperation(status) || this._shutdownCountdownOperationId !== operationId ||
                     !this._shutdownStatusReady(this._lastGoodStatus))
                     return false;
                 if (!this._shutdownHudVisible(this._lastGoodStatus)) {
@@ -2027,7 +2171,9 @@ export default class LoginHudExtension extends Extension {
                     GLib.PRIORITY_DEFAULT,
                     100,
                     () => {
-                        if (!this._hud || this._activeOperationId !== operationId ||
+                        if (!this._ownsEpoch(epoch) || !this._isCurrentOperation(status))
+                            return GLib.SOURCE_REMOVE;
+                        if (this._activeOperationId !== operationId ||
                             !this._shutdownStatusReady(this._lastGoodStatus)) {
                             this._shutdownCountdownId = 0;
                             this._shutdownCountdownOperationId = null;
@@ -2062,7 +2208,7 @@ export default class LoginHudExtension extends Extension {
     }
 
     _commitShutdown(status) {
-        if (!this._shutdownStatusReady(status) ||
+        if (!this._isCurrentOperation(status) || !this._shutdownStatusReady(status) ||
             this._commitWrittenOperationId === status.operationId)
             return;
         if (!this._shutdownHudVisible(status)) {
@@ -2074,6 +2220,7 @@ export default class LoginHudExtension extends Extension {
                 schema_version: 1,
                 operation_id: status.operationId,
                 session_id: status.sessionId,
+                ...(status.operationContext ? {operation_context: status.operationContext} : {}),
                 committed_at: new Date().toISOString(),
             });
             this._commitWrittenOperationId = status.operationId;
@@ -2155,10 +2302,13 @@ export default class LoginHudExtension extends Extension {
                 );
             return;
         }
+        const epoch = this._enableEpoch;
         this._preparedCheckPending = true;
-        this._preparedFile.load_contents_async(null, (file, result) => {
+        this._preparedFile.load_contents_async(this._cancellable, (file, result) => {
+            if (!this._ownsEpoch(epoch))
+                return;
             this._preparedCheckPending = false;
-            if (!this._hud || this._lastGoodStatus?.operationId !== status.operationId)
+            if (!this._hud || !this._isCurrentOperation(status))
                 return;
             try {
                 const [, bytes] = file.load_contents_finish(result);
@@ -2166,7 +2316,8 @@ export default class LoginHudExtension extends Extension {
                 if (prepared.schema_version !== 1 ||
                     prepared.operation_id !== status.operationId ||
                     prepared.session_id !== status.sessionId ||
-                    prepared.action !== status.shutdownAction)
+                    prepared.action !== status.shutdownAction ||
+                    !sameOperationContext(prepared.operation_context, status.operationContext))
                     return;
                 this._handoffToGnome(status);
             } catch (error) {
@@ -2179,7 +2330,7 @@ export default class LoginHudExtension extends Extension {
     }
 
     _handoffToGnome(status) {
-        if (!this._shutdownStatusReady(status) || this._nativeHandoffOperationId ||
+        if (!this._isCurrentOperation(status) || !this._shutdownStatusReady(status) || this._nativeHandoffOperationId ||
             this._commitWrittenOperationId !== status.operationId)
             return;
         if (!this._shutdownHudVisible(this._lastGoodStatus) ||
@@ -2203,10 +2354,14 @@ export default class LoginHudExtension extends Extension {
         console.info(`Login HUD: completed visible countdown, handing off ${status.shutdownAction}; operation=${status.operationId}`);
         this._stopPreparedPolling();
         this._hud.setHandoffStarted(status.shutdownAction || this._preflightAction);
+        const epoch = this._enableEpoch;
         this._confirmBypass = true;
         try {
             Promise.resolve(this._originalEndSessionConfirm.call(this._endSessionDialog, signal))
-                .catch(error => this._handleNativeHandoffFailure(status, error));
+                .catch(error => {
+                    if (this._ownsEpoch(epoch))
+                        this._handleNativeHandoffFailure(status, error);
+                });
         } catch (error) {
             this._handleNativeHandoffFailure(status, error);
         } finally {
@@ -2225,6 +2380,7 @@ export default class LoginHudExtension extends Extension {
                 schema_version: 1,
                 operation_id: status.operationId,
                 session_id: status.sessionId,
+                ...(status.operationContext ? {operation_context: status.operationContext} : {}),
                 requested_at: new Date().toISOString(),
             });
         } catch (cancelError) {
@@ -2268,6 +2424,7 @@ export default class LoginHudExtension extends Extension {
                     schema_version: 1,
                     operation_id: status.operationId,
                     session_id: status.sessionId,
+                    ...(status.operationContext ? {operation_context: status.operationContext} : {}),
                     requested_at: new Date().toISOString(),
                 });
             } catch (error) {
@@ -2315,6 +2472,8 @@ export default class LoginHudExtension extends Extension {
                 schema_version: 1,
                 operation_id: operationId,
                 session_id: this._currentSessionId,
+                ...(this._lastGoodStatus?.operationId === operationId && this._lastGoodStatus.operationContext
+                    ? {operation_context: this._lastGoodStatus.operationContext} : {}),
                 requested_at: new Date().toISOString(),
             });
         } catch (error) {
@@ -2329,9 +2488,10 @@ export default class LoginHudExtension extends Extension {
             this._resolveCurrentSessionId();
             return;
         }
+        const epoch = this._enableEpoch;
         const serial = ++this._loadSerial;
-        this._statusFile.load_contents_async(null, (file, result) => {
-            if (!this._hud || serial !== this._loadSerial)
+        this._statusFile.load_contents_async(this._cancellable, (file, result) => {
+            if (!this._ownsEpoch(epoch) || serial !== this._loadSerial)
                 return;
             try {
                 const [, bytes] = file.load_contents_finish(result);
@@ -2346,8 +2506,10 @@ export default class LoginHudExtension extends Extension {
                 const matchesRequest = request?.schema_version === 1 &&
                     request.operation_id === parsed.operationId &&
                     request.session_id === parsed.sessionId &&
-                    SHUTDOWN_ACTIONS.has(request.action);
-                const matchesLocalPreflight = parsed.operationId === this._preflightOperationId;
+                    SHUTDOWN_ACTIONS.has(request.action) &&
+                    request.action === parsed.shutdownAction;
+                const matchesLocalPreflight = parsed.operationId === this._preflightOperationId &&
+                    parsed.shutdownAction === this._preflightAction;
                 const terminalShutdown = parsed.mode === 'shutdown' &&
                     (parsed.cancelled || parsed.overallState === 'failed' ||
                         parsed.stages.some(stage => stage.state === 'failed'));
@@ -2374,10 +2536,18 @@ export default class LoginHudExtension extends Extension {
                     GLib.Source.remove(this._preflightWatchdogId);
                     this._preflightWatchdogId = 0;
                 }
+                const previousContext = this._lastGoodStatus?.operationContext;
+                if (previousContext && parsed.mode === 'shutdown' &&
+                    parsed.operationId === this._lastGoodStatus.operationId &&
+                    (!parsed.operationContext || parsed.operationContext.attempt < previousContext.attempt ||
+                    (parsed.operationContext.attempt === previousContext.attempt &&
+                        !sameOperationContext(parsed.operationContext, previousContext))))
+                    return;
                 const isNewSessionOrMode = parsed.sessionId !== this._activeSessionId ||
                     parsed.mode !== this._activeMode ||
                     parsed.operationId !== this._activeOperationId ||
-                    parsed.startedAt !== this._activeStartedAt;
+                    parsed.startedAt !== this._activeStartedAt ||
+                    Boolean(parsed.operationContext && !sameOperationContext(parsed.operationContext, previousContext));
                 if (isNewSessionOrMode) {
                     this._cancelShutdownCountdown();
                     this._dismissed = false;
@@ -2413,6 +2583,13 @@ export default class LoginHudExtension extends Extension {
                         ? 'ConfirmedReboot'
                         : parsed.shutdownAction === 'poweroff' ? 'ConfirmedShutdown' : null;
                 }
+                const cancellation = parsed.mode === 'shutdown'
+                    ? this._readProtocolFileSync(this._cancelFile) : null;
+                if (cancellation?.schema_version === 1 && cancellation.operation_id === parsed.operationId &&
+                    cancellation?.session_id === parsed.sessionId &&
+                    (!parsed.operationContext || sameOperationContext(
+                        cancellation.operation_context, parsed.operationContext)))
+                    this._withdrawShutdownAuthority(parsed);
                 this._lastGoodStatus = parsed;
                 if (parsed.mode === 'startup')
                     this._loadAlerts();
@@ -2438,6 +2615,13 @@ export default class LoginHudExtension extends Extension {
                     }
                 }
                 this._syncVisibility();
+                if (parsed.mode === 'shutdown' && !parsed.operationContext)
+                    this._hud.setTransportNotice('Shutdown is stopped: the coordinator must be upgraded to publish operation context.');
+                else if (parsed.mode === 'shutdown' && !this._hasShutdownAuthority(parsed) &&
+                    !this._isLocallyCancelled(parsed))
+                    this._hud.setTransportNotice('Shutdown is stopped: operation context is expired or belongs to another login.');
+                else if (this._isLocallyCancelled(parsed) && !parsed.cancelled)
+                    this._hud.setTransportNotice('Shutdown authorization withdrawn. Backend recovery remains pending; desktop input is released.');
                 this._handleTerminalShutdownStatus(parsed);
             } catch (error) {
                 if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND)) {
@@ -2453,18 +2637,19 @@ export default class LoginHudExtension extends Extension {
     _loadAlerts() {
         if (!this._hud || !this._alertsFile || this._lastGoodStatus?.mode !== 'startup')
             return;
+        const epoch = this._enableEpoch;
         const serial = ++this._alertsSerial;
         const file = this._alertsFile;
         file.query_info_async('standard::size,standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
-            GLib.PRIORITY_DEFAULT, null, (_file, result) => {
-                if (!this._hud || serial !== this._alertsSerial)
+            GLib.PRIORITY_DEFAULT, this._cancellable, (_file, result) => {
+                if (!this._ownsEpoch(epoch) || serial !== this._alertsSerial)
                     return;
                 try {
                     const info = file.query_info_finish(result);
                     if (info.get_file_type() !== Gio.FileType.REGULAR || info.get_size() > 2 * 1024 * 1024)
                         throw new Error('Invalid owned-system report file');
-                    file.load_contents_async(null, (_source, contents) => {
-                        if (!this._hud || serial !== this._alertsSerial || this._lastGoodStatus?.mode !== 'startup')
+                    file.load_contents_async(this._cancellable, (_source, contents) => {
+                        if (!this._ownsEpoch(epoch) || serial !== this._alertsSerial || this._lastGoodStatus?.mode !== 'startup')
                             return;
                         try {
                             const [, bytes] = file.load_contents_finish(contents);
@@ -2482,18 +2667,19 @@ export default class LoginHudExtension extends Extension {
     _loadGcProfiles() {
         if (!this._hud || !this._gcStatusFile || this._lastGoodStatus?.mode !== 'startup')
             return;
+        const epoch = this._enableEpoch;
         const serial = ++this._gcSerial;
         const file = this._gcStatusFile;
         file.query_info_async('standard::size,standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
-            GLib.PRIORITY_DEFAULT, null, (_file, result) => {
-            if (!this._hud || serial !== this._gcSerial || this._lastGoodStatus?.mode !== 'startup')
+            GLib.PRIORITY_DEFAULT, this._cancellable, (_file, result) => {
+            if (!this._ownsEpoch(epoch) || serial !== this._gcSerial || this._lastGoodStatus?.mode !== 'startup')
                 return;
             try {
                 const info = file.query_info_finish(result);
                 if (info.get_file_type() !== Gio.FileType.REGULAR || info.get_size() > GC_MAX_STATUS_BYTES)
                     throw new Error('Invalid GC profile status file');
-                file.load_contents_async(null, (_source, contents) => {
-                    if (!this._hud || serial !== this._gcSerial || this._lastGoodStatus?.mode !== 'startup')
+                file.load_contents_async(this._cancellable, (_source, contents) => {
+                    if (!this._ownsEpoch(epoch) || serial !== this._gcSerial || this._lastGoodStatus?.mode !== 'startup')
                         return;
                     try {
                         const [, bytes] = file.load_contents_finish(contents);
@@ -2524,13 +2710,14 @@ export default class LoginHudExtension extends Extension {
         if (this._lastGoodStatus?.mode !== 'startup' ||
             !/^[a-z0-9][a-z0-9_.-]{0,79}$/.test(source) || !/^[a-z0-9][a-z0-9_.-]{0,79}$/.test(code))
             return;
+        const epoch = this._enableEpoch;
         try {
             const process = Gio.Subprocess.new([
                 GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'wsctl']),
                 'alerts', 'ack', source, code,
             ], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
-            process.wait_check_async(null, (_process, result) => {
-                if (!this._hud)
+            process.wait_check_async(this._cancellable, (_process, result) => {
+                if (!this._ownsEpoch(epoch))
                     return;
                 try {
                     process.wait_check_finish(result);
@@ -2552,28 +2739,29 @@ export default class LoginHudExtension extends Extension {
         )
             return false;
 
+        this._withdrawShutdownAuthority(status);
+        this._cancelNativeEndSessionOnce(status.operationId);
         try {
             this._writeProtocolFile(this._cancelFile, 'shutdown-cancel', {
                 schema_version: 1,
                 operation_id: status.operationId,
                 session_id: status.sessionId,
+                ...(status.operationContext ? {operation_context: status.operationContext} : {}),
                 requested_at: new Date().toISOString(),
             });
-            this._locallyCancelledOperationId = status.operationId;
-            this._cancelShutdownCountdown();
             this._cancelRequestPending = true;
             this._hud.setCancellationPending(true);
             this._hud.setTransportNotice(
                 'Cancellation requested. Prepared jobs are being restored ' +
                 'before the shutdown transaction closes.'
             );
-            this._cancelNativeEndSessionOnce(status.operationId);
             return true;
         } catch (error) {
             this._cancelRequestPending = false;
             this._hud.setCancellationPending(false);
             this._hud.setTransportNotice(
-                `Could not send the cancellation request: ${error.message}`
+                `Shutdown authorization withdrawn locally; desktop input is released. ` +
+                `Backend recovery request could not be delivered: ${error.message}`
             );
             return false;
         }
@@ -2589,13 +2777,16 @@ export default class LoginHudExtension extends Extension {
         const hasFailure = status?.overallState === 'failed' ||
             status?.stages.some(stage => stage.state === 'failed');
         const keepVisible = status?.mode === 'shutdown' && hasFailure;
+        const epoch = this._enableEpoch;
         const uri = Gio.File.new_for_path(path).get_uri();
         try {
             if (!keepVisible) {
                 this._dismissed = true;
                 this._syncVisibility();
             }
-            Gio.AppInfo.launch_default_for_uri_async(uri, null, null, (_source, result) => {
+            Gio.AppInfo.launch_default_for_uri_async(uri, null, this._cancellable, (_source, result) => {
+                if (!this._ownsEpoch(epoch))
+                    return;
                 try {
                     Gio.AppInfo.launch_default_for_uri_finish(result);
                 } catch (error) {

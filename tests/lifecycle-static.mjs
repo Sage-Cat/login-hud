@@ -245,20 +245,14 @@ assert.match(
     /_recoverPendingPreflightRequest\(\)[\s\S]*?\^\[0-9a-f\]\{32\}\$[\s\S]*?request\.session_id !== this\._currentSessionId[\s\S]*?this\._startPreflightWatchdog/,
     'an extension reload must safely recover only a fresh current-session preflight request'
 );
-assert.match(
-    source,
-    /status\.operationId !== this\._locallyCancelledOperationId[\s\S]*?this\._locallyCancelledOperationId = status\.operationId;\s*this\._cancelShutdownCountdown\(\)/,
-    'a local cancel must synchronously fence commit and prepared-marker races'
-);
+// Cancellation ordering and late status are exercised by shutdown-visibility.mjs.
+
 assert.match(
     source,
     /_updateOverallProgressFill\(\) \{\s*if \(!this\._overallProgressTrack\.get_stage\(\) \|\| !this\._overallProgressTrack\.mapped\)\s*return;/,
     'progress geometry must not be read while actors are unattached'
 );
-assert.match(
-    source,
-    /cancelDeferredUpdates\(\)[\s\S]*?GLib\.Source\.remove\(this\._overallProgressFillId\)[\s\S]*?this\._hud\.cancelDeferredUpdates\(\);/,
-    'extension disable must remove deferred actor callbacks before destroying the HUD'
-);
+// Deferred actor cleanup ordering is exercised by enable-lifecycle.mjs.
+
 
 console.log('check: lifecycle safety invariants passed');

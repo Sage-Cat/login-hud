@@ -231,10 +231,48 @@ login is the authoritative deployment test.
 
 `make check` validates `metadata.json`, parses `extension.js` as an ES module with Node's stdin module syntax checker, and runs the pinned ESLint toolchain. `tests/check.sh` additionally checks lifecycle and two-phase shutdown invariants: no chrome before valid status parsing, install-before-layout, safe allocation checks, coordinator fail-open, shutdown-only modal capture, durable request/paint/commit markers, prepared-marker matching, exact deferred GNOME handoff, cancellation, and wrapper restoration. Node is used only for static validation; the extension itself uses GNOME Shell GJS/GI APIs exclusively.
 
-Validate the release payload and its checksums; installed files and running cached Shell modules may differ until a fresh login.
+Validate an install in an isolated `XDG_DATA_HOME` and compare its payload with the
+release checksums. A fresh GNOME login may be required to activate updated modules;
+installed file identity alone does not prove which build Shell currently runs.
 
 For an installed extension, inspect Shell's view of it with:
 
 ```sh
 gnome-extensions info login-hud-v2@sagecat.local
 ```
+
+## Cancellation and running-build diagnostics
+
+Cancellation immediately withdraws local shutdown authorization and releases the
+HUD input grab, even if its backend request cannot be written. Recovery remains
+visible and pending; a late ready status cannot reauthorize the cancelled operation.
+Status authorization requires an immutable `operation_context` with `boot_id`,
+`login_generation`, `operation_id`, `mode`, positive `attempt`, and absolute
+boot-bound monotonic `deadline` seconds. Render/commit/cancel markers echo that
+context exactly. Legacy reports remain readable, but cannot authorize handoff;
+upgrade the coordinator before activating this HUD build.
+
+GC heartbeat updates cache their data without rebuilding hidden or unchanged UI.
+The visible GC view still detects stale collectors, and refreshes when shown.
+
+```sh
+gdbus call --session --dest org.gnome.Shell --object-path /org/sagecat/LoginHud --method org.sagecat.LoginHud.GetState
+```
+
+This read-only response includes operation/cancellation state and
+`build: {uuid, version, revision, sourceIdentityKnown}`. Release staging stamps the
+imported `buildInfo.js`; `development` deliberately reports unknown source identity.
+Installed files and running cached Shell modules may differ until activation.
+
+## Checks and releases
+
+```sh
+npm ci
+make check
+make release-artifacts
+```
+
+The [CI workflow](.github/workflows/ci.yml) verifies each change. Successful pushes
+to the default branch publish a commit-addressed `build-<full-commit-SHA>` release
+with a source archive, applicable extension bundles, and SHA-256 checksums.
+See the [release process](https://github.com/Sage-Cat/workspace-state/blob/main/docs/publication.md) for artifact and verification details.

@@ -19,7 +19,7 @@ temporary_dir=$(mktemp -d)
 trap 'rm -rf -- "$temporary_dir"' EXIT HUP INT TERM
 
 unzip -Z1 "$archive" | sed '/\/$/d' | LC_ALL=C sort > "$temporary_dir/actual"
-printf '%s\n' extension.js metadata.json stylesheet.css | LC_ALL=C sort > "$temporary_dir/expected"
+printf '%s\n' buildInfo.js extension.js metadata.json stylesheet.css | LC_ALL=C sort > "$temporary_dir/expected"
 if ! diff -u "$temporary_dir/expected" "$temporary_dir/actual"; then
     printf 'verify-package: unexpected archive contents\n' >&2
     exit 1

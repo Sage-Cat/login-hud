@@ -23,7 +23,7 @@ if [ "$#" -ne 0 ]; then
     exit 2
 fi
 
-for file in metadata.json extension.js stylesheet.css; do
+for file in metadata.json extension.js buildInfo.js stylesheet.css; do
     if [ ! -f "$source_dir/$file" ]; then
         printf 'install: missing source file: %s\n' "$source_dir/$file" >&2
         exit 1
@@ -34,6 +34,7 @@ install -d -m 0755 "$extension_root" "$destination"
 install -m 0644 \
     "$source_dir/metadata.json" \
     "$source_dir/extension.js" \
+    "$source_dir/buildInfo.js" \
     "$source_dir/stylesheet.css" \
     "$destination/"
 
