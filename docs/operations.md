@@ -45,8 +45,9 @@ unavailable. The HUD has no cleanup start/stop controls.
    confirmation.
 
 A failed step stops handoff, releases modal capture, and keeps its report visible
-with **Show full error log**. There is no close action for a failed shutdown
-report; a new shutdown attempt or session end replaces it. A `degraded` result
+with **Show full error log**. Use **Close** or Escape to dismiss the report.
+While recovery is still running, the button reads **Hide (recovery continues)**;
+hiding the HUD does not interrupt recovery or permit shutdown. A `degraded` result
 means verified fallback state was retained, with the reason in stage activity.
 It is distinct from failure.
 

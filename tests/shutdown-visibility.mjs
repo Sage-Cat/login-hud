@@ -16,7 +16,7 @@ function fixture() {
             GObject: {registerClass: cls => cls}, St: {Widget: class {}}, Extension: class {},
             Main: {sessionMode, popModal() { modalPops++; }, pushModal() { throw new Error("unexpected modal acquisition"); }}, console: {info() {}, warn() {}, error() {}}, TextDecoder,
             global: {stage: {queue_redraw() {}}},
-            Clutter: {RepaintFlags: {POST_PAINT: 1}, threads_add_repaint_func_full(_flags, fn) { paints.push(fn); }},
+            Clutter: {KEY_Escape: 'Escape', EVENT_PROPAGATE: 'propagate', EVENT_STOP: 'stop', RepaintFlags: {POST_PAINT: 1}, threads_add_repaint_func_full(_flags, fn) { paints.push(fn); }},
             GLib: {PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false, SOURCE_CONTINUE: true,
                 get_monotonic_time: () => clock * 1e6,
                 timeout_add(_priority, _interval, fn) { timers.push(fn); return timers.length; },
@@ -296,4 +296,72 @@ test('authorization markers echo exact operation context and old attempts cannot
     assert.equal(markers.length, 2);
     f.extension._commitWrittenOperationId = f.status.operationId;
     f.extension._handoffToGnome(f.status); assert.equal(f.handoffs(), 0);
+});
+
+
+test('failed or cancelled shutdown report closes and fences late ready updates', () => {
+    for (const change of [status => { status.overallState = 'failed'; },
+        status => { status.cancelled = true; },
+        status => { status.stages = [{state: 'failed'}, {state: 'running'}]; }]) {
+        const f = fixture();
+        change(f.status);
+        f.extension._modalGrab = {};
+        f.extension._dismissHud();
+        assert.equal(f.extension._dismissed, true);
+        assert.equal(f.extension._hud.visible, false);
+        assert.equal(f.modalPops(), 1);
+        assert.equal(f.cancels(), 0);
+        assert.equal(f.commits(), 0);
+        const late = {...f.status, overallState: 'ready', cancelled: false, stages: [{state: 'ready'}]};
+        assert.equal(f.extension._hasShutdownAuthority(late), false);
+        f.extension._lastGoodStatus = late;
+        f.extension._syncVisibility();
+        assert.equal(f.extension._hud.visible, false);
+        f.extension._commitShutdown(late);
+        assert.equal(f.commits(), 0);
+    }
+});
+
+test('Escape closes a failed shutdown report but requests cancellation of active shutdown', () => {
+    for (const failed of [true, false]) {
+        const f = fixture();
+        f.status.overallState = failed ? 'failed' : 'running';
+        assert.equal(f.extension._handleHudKeyPress({get_key_symbol: () => 'Escape'}), 'stop');
+        assert.equal(f.cancels(), failed ? 0 : 1);
+        assert.equal(f.extension._hud.visible, !failed);
+    }
+    const f = fixture();
+    assert.equal(f.extension._handleHudKeyPress({get_key_symbol: () => 'A'}), 'propagate');
+    assert.equal(f.cancels(), 0);
+    f.status.mode = 'startup';
+    assert.equal(f.extension._handleHudKeyPress({get_key_symbol: () => 'Escape'}), 'propagate');
+    assert.equal(f.extension._hud.visible, true);
+});
+
+test('failed shutdown actions offer logs and dismissal while recovery can continue', () => {
+    class Actor {
+        constructor(props) { Object.assign(this, props); }
+        connect(_signal, callback) { this.activate = callback; }
+    }
+    const {LoginHud} = runInNewContext(
+        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+            '\n;({LoginHud});', {
+            GObject: {registerClass: cls => cls},
+            St: {Widget: class {}, Button: Actor, Label: Actor}, Extension: class {},
+        });
+    for (const recovering of [false, true]) {
+        const actions = [];
+        let closed = 0;
+        const hud = Object.assign(Object.create(LoginHud.prototype), {
+            scheduleProgressFill() {}, _onCloseRequested() { closed++; },
+            _actions: {destroy_all_children() {}, add_child(actor) { actions.push(actor); }},
+        });
+        hud._renderActions({mode: 'shutdown', overallState: 'failed', cancelled: true,
+            stages: [{state: 'failed'}, {state: recovering ? 'running' : 'ready'}]});
+        assert.ok(actions.some(actor => actor.label === 'Show full error log'));
+        const button = actions.find(actor => actor.label === (recovering ? 'Hide (recovery continues)' : 'Close'));
+        assert.ok(button);
+        button.activate();
+        assert.equal(closed, 1);
+    }
 });

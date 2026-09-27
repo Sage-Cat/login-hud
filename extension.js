@@ -1079,9 +1079,9 @@ class LoginHud extends St.Widget {
                     style_class: 'login-hud-action-status',
                     text: 'Shutdown stopped · review the error and retry power off',
                 }));
-            } else {
-                this._addCloseButton('Close');
             }
+            this._addCloseButton(status.mode === 'shutdown' && !allTerminal
+                ? 'Hide (recovery continues)' : 'Close');
         } else if (status.mode === 'shutdown' && this._handoffStarted) {
             this._actions.add_child(new St.Label({
                 style_class: 'login-hud-action-status',
@@ -1239,18 +1239,8 @@ export default class LoginHudExtension extends Extension {
             (source, code) => this._ackAlert(source, code)
         );
         this._hud.visible = false;
-        this._hudKeyPressId = this._hud.connect('key-press-event', (_actor, event) => {
-            if (event.get_key_symbol() !== Clutter.KEY_Escape)
-                return Clutter.EVENT_PROPAGATE;
-            const status = this._lastGoodStatus;
-            const hasFailure = status?.overallState === 'failed' ||
-                status?.stages.some(stage => stage.state === 'failed');
-            if (status?.mode === 'shutdown' && !status.cancelled && !hasFailure) {
-                this._requestCancel(status);
-                return Clutter.EVENT_STOP;
-            }
-            return Clutter.EVENT_PROPAGATE;
-        });
+        this._hudKeyPressId = this._hud.connect('key-press-event',
+            (_actor, event) => this._handleHudKeyPress(event));
         this._sessionModeUpdatedId = Main.sessionMode.connect('updated', () => {
             this._syncVisibility();
         });
@@ -1786,18 +1776,29 @@ export default class LoginHudExtension extends Extension {
         }
     }
 
+    _handleHudKeyPress(event) {
+        if (event.get_key_symbol() !== Clutter.KEY_Escape ||
+            this._lastGoodStatus?.mode !== 'shutdown')
+            return Clutter.EVENT_PROPAGATE;
+        this._dismissHud();
+        return Clutter.EVENT_STOP;
+    }
+
     _dismissHud() {
         const status = this._lastGoodStatus;
         const hasFailure = status?.overallState === 'failed' ||
             status?.stages.some(stage => stage.state === 'failed');
-        if (status?.mode === 'shutdown' && hasFailure) {
-            this._hud?.setTransportNotice(
-                'A failed shutdown report remains open until a new shutdown attempt or logout.'
-            );
-            return;
+        if (status?.mode === 'shutdown') {
+            if (!status.cancelled && !hasFailure) {
+                this._requestCancel(status);
+                return;
+            }
+            // Hiding the report does not stop backend recovery. It must never
+            // allow a delayed ready update to authorize this shutdown again.
+            this._withdrawShutdownAuthority(status);
         }
-        if (this._lastGoodStatus?.mode === 'startup')
-            this._recordStartupDismissal(this._lastGoodStatus, 'user');
+        if (status?.mode === 'startup')
+            this._recordStartupDismissal(status, 'user');
         else
             this._dismissed = true;
         this._syncVisibility();
