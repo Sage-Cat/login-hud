@@ -2508,7 +2508,8 @@ export default class LoginHudExtension extends Extension {
                     request.session_id === parsed.sessionId &&
                     SHUTDOWN_ACTIONS.has(request.action) &&
                     request.action === parsed.shutdownAction;
-                const matchesLocalPreflight = parsed.operationId === this._preflightOperationId &&
+                const matchesLocalPreflight = parsed.mode === 'shutdown' &&
+                    parsed.operationId === this._preflightOperationId &&
                     parsed.shutdownAction === this._preflightAction;
                 const terminalShutdown = parsed.mode === 'shutdown' &&
                     (parsed.cancelled || parsed.overallState === 'failed' ||
@@ -2599,15 +2600,15 @@ export default class LoginHudExtension extends Extension {
                 if (eligible) {
                     this._installHudChrome();
                     this._hud.setStatus(parsed);
-                    if (this._nativeHandoffOperationId === parsed.operationId) {
+                    if (parsed.mode === 'shutdown' && this._nativeHandoffOperationId === parsed.operationId) {
                         this._hud.setHandoffStarted(parsed.shutdownAction || this._preflightAction);
-                    } else if (this._shutdownCountdownOperationId === parsed.operationId &&
+                    } else if (parsed.mode === 'shutdown' && this._shutdownCountdownOperationId === parsed.operationId &&
                         this._shutdownCountdownSeconds > 0) {
                         this._hud.setShutdownCountdown(
                             parsed.shutdownAction || this._preflightAction,
                             this._shutdownCountdownSeconds
                         );
-                    } else if (this._commitWrittenOperationId === parsed.operationId &&
+                    } else if (parsed.mode === 'shutdown' && this._commitWrittenOperationId === parsed.operationId &&
                         parsed.shutdownOrigin === 'preflight') {
                         this._hud.setAwaitingPrepared(
                             parsed.shutdownAction || this._preflightAction

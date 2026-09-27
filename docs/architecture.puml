@@ -1,0 +1,53 @@
+@startuml
+!theme plain
+skinparam backgroundColor #FAFCFE
+skinparam shadowing false
+skinparam defaultFontName SansSerif
+skinparam componentStyle rectangle
+skinparam ArrowColor #365369
+skinparam packageBorderColor #849CAD
+skinparam componentBackgroundColor #EAF4FA
+skinparam noteBackgroundColor #FFF6D7
+left to right direction
+
+title Login HUD — presentation and shutdown authorization
+
+actor User
+package "GNOME Shell 46 / Wayland" {
+  component "Native end-session dialog" as Native
+  component "Login HUD extension\ncurrent-session validation\nprogress / reports / cancellation" as HUD
+  component "Shell chrome\nstartup: bounded input region\nshutdown: conditional modal grab" as UI
+}
+package "Private per-user files" {
+  artifact "login-hud-status.json\noperation context + stages" as Status
+  artifact "request → rendered → commit\ncancel / prepared markers" as Markers
+  artifact "alerts.json\ngc-profiled/status.json" as Reports
+}
+package "Separate producers" {
+  component "Workspace coordinator\noperation ownership\ncheckpoint verification / recovery" as Coordinator
+  component "Application restore / capture adapters" as Adapters
+  component "Owned-system collector\nand cleanup scheduler" as Collectors
+}
+
+User --> Native : confirms Power Off / Restart
+Native --> HUD : final confirmation interception
+HUD --> UI : render validated state
+User --> UI : expand / review / cancel
+Coordinator --> Status : atomic replacement
+Status --> HUD : directory monitor + validation
+HUD --> Markers : request / painted / commit / cancel
+Markers --> Coordinator : exact operation-bound evidence
+Coordinator --> Markers : prepared / recovery result
+Markers --> HUD : matching prepared proof
+HUD --> Native : saved confirmation\nonly after proof
+Coordinator --> Adapters : restore / verify / checkpoint
+Collectors --> Reports : bounded status reports
+Reports --> HUD : startup tabs only
+
+note bottom of HUD
+No application restoration or cleanup policy here.
+Startup never acquires a modal grab.
+Missing, stale or mismatched evidence cannot
+ authorize a shutdown handoff.
+end note
+@enduml

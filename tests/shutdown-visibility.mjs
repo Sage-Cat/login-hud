@@ -88,6 +88,42 @@ test('shutdown status cannot replace the action from a confirmed request or loca
     }
 });
 
+test('startup null identity never displays handoff while a matching shutdown still does', () => {
+    for (const mode of ['startup', 'shutdown']) {
+        const f = fixture();
+        const operationId = mode === 'shutdown' ? f.status.operationId : null;
+        const raw = {schema_version: 1, mode, session_id: 'session',
+            started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:01Z',
+            overall_state: 'running', overall_message: 'Restoring example windows',
+            error_log_path: '/tmp/example.txt', stages: [{id: 'example', state: 'running', message: 'Working'}],
+            ...(mode === 'shutdown' ? {operation_id: operationId, operation_context: f.status.operationContext,
+                shutdown_origin: 'preflight', shutdown_action: 'poweroff'} : {})};
+        const handoffs = [];
+        const notices = [];
+        Object.assign(f.extension, {
+            _loadSerial: 0, _nativeHandoffOperationId: operationId,
+            _commitWrittenOperationId: null, _shutdownCountdownOperationId: null, _shutdownCountdownSeconds: 0,
+            _activeSessionId: 'session', _activeMode: mode, _activeOperationId: operationId,
+            _activeStartedAt: raw.started_at, _preflightOperationId: operationId,
+            _preflightAction: mode === 'shutdown' ? 'poweroff' : null,
+            _startupDismissalMatches: () => false, _startupPresentationIsStale: () => false,
+            _loadAlerts() {}, _loadGcProfiles() {}, _syncVisibility() {}, _installHudChrome() {},
+            _handleTerminalShutdownStatus() {}, _readProtocolFileSync: () => null,
+            _statusFile: {load_contents_async(_cancel, callback) { callback(this, {}); },
+                load_contents_finish() { return [true, new TextEncoder().encode(JSON.stringify(raw))]; }},
+        });
+        f.extension._hud.setHandoffStarted = action => handoffs.push(action);
+        f.extension._hud.setAwaitingPrepared = () => handoffs.push('prepared');
+        f.extension._hud.setShutdownCountdown = () => handoffs.push('countdown');
+        f.extension._hud.setTransportNotice = message => notices.push(message);
+        f.extension._loadStatus();
+        assert.equal(f.extension._lastGoodStatus.mode, mode);
+        assert.equal(f.extension._lastGoodStatus.shutdownOrigin, mode === 'shutdown' ? 'preflight' : null);
+        assert.deepEqual(notices, []);
+        assert.deepEqual(handoffs, mode === 'shutdown' ? ['poweroff'] : []);
+    }
+});
+
 test('five visible seconds begin only after the completed HUD frame is painted', () => {
     const f = fixture();
     f.extension._startShutdownCountdown(f.status);

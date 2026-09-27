@@ -1,0 +1,44 @@
+{
+  "method": "GNOME Shell headless Wayland, private session bus, synthetic telemetry",
+  "gnome_shell": "GNOME Shell 46.0",
+  "extension_version": 18,
+  "virtual_monitor": "1400x1100, scale 1",
+  "capture": "Shell.Screenshot panel area; no post-processing",
+  "source_sha256": {
+    "extension.js": "0af8d357a54f9ba8e542cfdb3e2f20f55f2c56d4e4dfade6a222cb0b41cac051",
+    "stylesheet.css": "e09442c07d6c8311cc6856ef3e89052997b63cfd5d4d2f4c0c63e811810735ca",
+    "scripts/screenshot-fixture.js": "c542fdb794c4fd864aeb15e2c9c69aa80af7047536f918abe9516095062ec41c"
+  },
+  "scenes": [
+    {
+      "scene": "startup",
+      "file": "startup.png",
+      "modal": false
+    },
+    {
+      "scene": "details",
+      "file": "details.png",
+      "modal": false
+    },
+    {
+      "scene": "alerts",
+      "file": "alerts.png",
+      "modal": false
+    },
+    {
+      "scene": "gc",
+      "file": "gc.png",
+      "modal": false
+    },
+    {
+      "scene": "shutdown",
+      "file": "shutdown.png",
+      "modal": true
+    },
+    {
+      "scene": "attention",
+      "file": "attention.png",
+      "modal": false
+    }
+  ]
+}
