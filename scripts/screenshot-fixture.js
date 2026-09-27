@@ -124,19 +124,41 @@ export default class DocumentationFixture extends Extension {
                 throw new Error('Screenshot output must be in the disposable runtime');
             const [x, y] = panel._panel.get_transformed_position();
             const [width, height] = panel._panel.get_transformed_size();
-            const stream = Gio.File.new_for_path(request.path).replace(null, false, Gio.FileCreateFlags.PRIVATE, null);
             this._capture = {done: false};
             const screenshot = new Shell.Screenshot();
-            screenshot.screenshot_area(Math.max(0, Math.floor(x) - 16), Math.max(0, Math.floor(y) - 16),
-                Math.ceil(width) + 32, Math.ceil(height) + 32, stream, (object, result) => {
-                    try {
-                        object.screenshot_area_finish(result);
-                        stream.close(null);
-                        this._capture = {done: true};
-                    } catch (error) {
-                        this._capture = {done: true, error: error.message};
-                    }
-                });
+            // screenshot_area() crashes Shell 46 if painting fails: its PNG worker
+            // dereferences the absent image. Stage-to-content reports that failure.
+            screenshot.screenshot_stage_to_content((object, result) => {
+                try {
+                    const [content, scale] = object.screenshot_stage_to_content_finish(result);
+                    const texture = content.get_texture();
+                    const left = Math.max(0, Math.floor((x - 16) * scale));
+                    const top = Math.max(0, Math.floor((y - 16) * scale));
+                    const right = Math.min(texture.get_width(), Math.ceil((x + width + 16) * scale));
+                    const bottom = Math.min(texture.get_height(), Math.ceil((y + height + 16) * scale));
+                    if (right <= left || bottom <= top)
+                        throw new Error('HUD capture is outside the virtual monitor');
+                    const stream = Gio.File.new_for_path(request.path).replace(
+                        null, false, Gio.FileCreateFlags.PRIVATE, null);
+                    Shell.Screenshot.composite_to_stream(texture, left, top, right - left, bottom - top,
+                        scale, null, 0, 0, 1, stream, (_source, writeResult) => {
+                            try {
+                                Shell.Screenshot.composite_to_stream_finish(writeResult);
+                                stream.close(null);
+                                this._capture = {done: true};
+                            } catch (error) {
+                                try {
+                                    stream.close(null);
+                                } catch (_) {
+                                    // Keep the original capture error for the caller.
+                                }
+                                this._capture = {done: true, error: error.message};
+                            }
+                        });
+                } catch (error) {
+                    this._capture = {done: true, error: error.message};
+                }
+            });
         }
         return {ready: !Main.layoutManager._startingUp, overview: Main.overview.visible,
             visible: Boolean(panel?.visible), mapped: Boolean(panel?.mapped),

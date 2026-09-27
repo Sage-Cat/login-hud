@@ -7,7 +7,7 @@
   "source_sha256": {
     "extension.js": "0af8d357a54f9ba8e542cfdb3e2f20f55f2c56d4e4dfade6a222cb0b41cac051",
     "stylesheet.css": "e09442c07d6c8311cc6856ef3e89052997b63cfd5d4d2f4c0c63e811810735ca",
-    "scripts/screenshot-fixture.js": "c542fdb794c4fd864aeb15e2c9c69aa80af7047536f918abe9516095062ec41c"
+    "scripts/screenshot-fixture.js": "f3b7acdac5249aabd5b0b0ac6cf93d64e1cf718df415ac3aaac2b085ed90ad07"
   },
   "scenes": [
     {
