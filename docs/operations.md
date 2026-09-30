@@ -32,6 +32,12 @@ unavailable. The HUD has no cleanup start/stop controls.
 
 ## Power off and restart
 
+Unlock the desktop before choosing Power Off or Restart. While locked, the
+extension cancels native confirmation (including its automatic countdown) so
+shutdown cannot skip the workspace checkpoint. The HUD and workspace details
+stay hidden on the lock screen. Standalone installations without the coordinator
+retain GNOME's native shutdown behavior.
+
 1. Use GNOME's normal Power Off or Restart action and confirm its native dialog.
 2. If the coordinator is active, the HUD shows checkpoint preparation. It does
    not intercept the earlier query or begin work merely because a status file

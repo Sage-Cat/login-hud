@@ -9,12 +9,15 @@ function fixture() {
     const timers = [];
     const paints = [];
     let modalPops = 0;
+    const notices = [];
     const sessionMode = {isLocked: false, isGreeter: false};
+    const main = {sessionMode, notify(...args) { notices.push(args); },
+        popModal() { modalPops++; }, pushModal() { throw new Error('unexpected modal acquisition'); }};
     const {LoginHudExtension} = runInNewContext(
         source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
             '\n;({LoginHudExtension});', {
             GObject: {registerClass: cls => cls}, St: {Widget: class {}}, Extension: class {},
-            Main: {sessionMode, popModal() { modalPops++; }, pushModal() { throw new Error("unexpected modal acquisition"); }}, console: {info() {}, warn() {}, error() {}}, TextDecoder,
+            Main: main, console: {info() {}, warn() {}, error() {}}, TextDecoder,
             global: {stage: {queue_redraw() {}}},
             Clutter: {KEY_Escape: 'Escape', EVENT_PROPAGATE: 'propagate', EVENT_STOP: 'stop', RepaintFlags: {POST_PAINT: 1}, threads_add_repaint_func_full(_flags, fn) { paints.push(fn); }},
             GLib: {PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false, SOURCE_CONTINUE: true,
@@ -44,9 +47,65 @@ function fixture() {
         _writeProtocolFile() { commits++; }, _startPreparedPolling() {}, _checkPreparedHandoff() {},
         _stopPreparedPolling() {}, _originalEndSessionConfirm() { handoffs++; },
     });
-    return {extension, status, panel, sessionMode, timers, paints,
+    return {extension, status, panel, sessionMode, timers, paints, main, notices,
         modalPops: () => modalPops, clock(value) { clock = value; }, cancels: () => cancels, commits: () => commits, handoffs: () => handoffs};
 }
+
+test('lock-screen confirmation cancels native shutdown without starting hidden work', async () => {
+    const metadata = JSON.parse(await readFile(new URL('../metadata.json', import.meta.url), 'utf8'));
+    assert.deepEqual(metadata['session-modes'], ['user', 'unlock-dialog']);
+    for (const boundary of ['isLocked', 'isGreeter']) {
+        for (const signal of ['ConfirmedShutdown', 'ConfirmedReboot']) {
+            const f = fixture();
+            let cancelled = 0;
+            f.sessionMode[boundary] = true;
+            f.extension._endSessionDialog = {cancel() { cancelled++; }};
+            f.extension._shutdownCoordinatorIsActive = () => true;
+            await f.extension._interceptEndSessionConfirm(signal);
+            assert.equal(cancelled, 1);
+            assert.equal(f.handoffs(), 0);
+            assert.equal(f.commits(), 0);
+            assert.equal(f.notices.length, 1);
+        }
+    }
+});
+
+test('standalone locked shutdown and ordinary logout retain native confirmation', async () => {
+    for (const [signal, active] of [['ConfirmedShutdown', false], ['ConfirmedLogout', true]]) {
+        const f = fixture();
+        f.sessionMode.isLocked = true;
+        f.extension._shutdownCoordinatorIsActive = () => active;
+        f.extension._endSessionDialog = {cancel() { throw new Error('unexpected cancel'); }};
+        await f.extension._interceptEndSessionConfirm(signal);
+        assert.equal(f.handoffs(), 1);
+        assert.equal(f.notices.length, 0);
+    }
+});
+
+test('session changes preserve one hook and replace only the owned old dialog hook', async () => {
+    const f = fixture();
+    const first = {_confirm() { throw new Error('native action must stay intercepted'); }};
+    const original = first._confirm;
+    f.main.endSessionDialog = first;
+    const seen = [];
+    f.extension._interceptEndSessionConfirm = signal => seen.push(signal);
+    f.extension._installEndSessionInterceptor();
+    const wrapped = first._confirm;
+    f.extension._installEndSessionInterceptor();
+    assert.equal(first._confirm, wrapped);
+    await first._confirm('ConfirmedShutdown');
+    assert.deepEqual(seen, ['ConfirmedShutdown']);
+    const next = {_confirm() {}};
+    f.main.endSessionDialog = next;
+    f.extension._installEndSessionInterceptor();
+    assert.equal(first._confirm, original);
+    await next._confirm('ConfirmedReboot');
+    assert.deepEqual(seen, ['ConfirmedShutdown', 'ConfirmedReboot']);
+    const foreign = () => {};
+    next._confirm = foreign;
+    f.extension._restoreEndSessionInterceptor();
+    assert.equal(next._confirm, foreign);
+});
 
 test('all jobs terminal is insufficient while overall verification is running', () => {
     const f = fixture();

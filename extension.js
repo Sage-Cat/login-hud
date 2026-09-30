@@ -1242,6 +1242,7 @@ export default class LoginHudExtension extends Extension {
         this._hudKeyPressId = this._hud.connect('key-press-event',
             (_actor, event) => this._handleHudKeyPress(event));
         this._sessionModeUpdatedId = Main.sessionMode.connect('updated', () => {
+            this._installEndSessionInterceptor();
             this._syncVisibility();
         });
 
@@ -1406,11 +1407,14 @@ export default class LoginHudExtension extends Extension {
 
     _installEndSessionInterceptor() {
         const dialog = Main.endSessionDialog;
+        if (dialog && dialog === this._endSessionDialog)
+            return;
         if (!dialog || typeof dialog._confirm !== 'function') {
             console.warn('Login HUD cannot install the GNOME end-session preflight interceptor.');
             return;
         }
 
+        this._restoreEndSessionInterceptor();
         this._endSessionDialog = dialog;
         this._originalEndSessionConfirm = dialog._confirm;
         this._wrappedEndSessionConfirm = async signal => {
@@ -1573,6 +1577,17 @@ export default class LoginHudExtension extends Extension {
                 'Login HUD shutdown coordinator is unavailable; using GNOME native shutdown.'
             );
             return this._originalEndSessionConfirm.call(this._endSessionDialog, signal);
+        }
+
+        // Keep the interceptor alive on the lock screen, but never expose the
+        // workspace HUD there. GNOME's timer also reaches this path: cancel its
+        // native request instead of silently powering off without a checkpoint.
+        if (Main.sessionMode.isLocked || Main.sessionMode.isGreeter) {
+            this._endSessionDialog.cancel();
+            console.info('Login HUD: shutdown cancelled while locked; unlock before retrying.');
+            Main.notify('Unlock before shutting down',
+                'Unlock the desktop and try again to save your workspace.');
+            return;
         }
 
         // GNOME may show a second "Power Off Anyway" dialog after another
