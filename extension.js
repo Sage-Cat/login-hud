@@ -43,7 +43,9 @@ const SHUTDOWN_ACTIONS = new Set(['poweroff', 'restart']);
 const SHUTDOWN_ORIGINS = new Set(['preflight']);
 const SHUTDOWN_COUNTDOWN_SECONDS = 5;
 const PREFLIGHT_STATUS_TIMEOUT_MS = 15000;
-const PREPARED_POLL_TIMEOUT_MS = 15000;
+// The coordinator has a 30-second app-drain budget after countdown commit.
+// Keep a bounded margin for publishing its result before cancelling handoff.
+const PREPARED_POLL_TIMEOUT_MS = 35000;
 const STALE_STARTUP_PRESENTATION_MS = 5 * 60 * 1000;
 const GC_STALE_AFTER_MS = 30 * 1000;
 const GC_FUTURE_TOLERANCE_MS = 5 * 1000;

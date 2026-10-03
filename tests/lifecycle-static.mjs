@@ -171,7 +171,7 @@ assert.match(
 );
 assert.match(
     source,
-    /const PREPARED_POLL_TIMEOUT_MS = 15000;[\s\S]*?elapsedMs >= PREPARED_POLL_TIMEOUT_MS[\s\S]*?this\._requestCancel\(status\)/,
+    /const PREPARED_POLL_TIMEOUT_MS = 35000;[\s\S]*?elapsedMs >= PREPARED_POLL_TIMEOUT_MS[\s\S]*?this\._requestCancel\(status\)/,
     'prepared polling must cancel safely instead of holding the modal forever'
 );
 assert.match(

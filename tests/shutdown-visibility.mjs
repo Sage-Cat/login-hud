@@ -115,6 +115,39 @@ test('all jobs terminal is insufficient while overall verification is running', 
     assert.equal(f.commits(), 0);
 });
 
+test('prepared wait covers app drain but still cancels an unresponsive coordinator', () => {
+    const f = fixture();
+    delete f.extension._startPreparedPolling;
+    f.extension._syncVisibility = () => {};
+    f.main.notifyError = (...args) => f.notices.push(args);
+    f.extension._commitWrittenOperationId = f.status.operationId;
+    f.extension._startPreparedPolling(f.status.operationId);
+    const poll = f.timers.at(-1);
+    for (const elapsed of [15, 25, 30, 34.9]) {
+        f.clock(elapsed);
+        assert.equal(poll(), true);
+        assert.equal(f.cancels(), 0);
+        assert.equal(f.handoffs(), 0);
+    }
+    f.clock(35);
+    assert.equal(poll(), false);
+    assert.equal(f.cancels(), 1);
+    assert.equal(f.extension._dismissed, true);
+    assert.equal(f.notices.length, 1);
+    assert.equal(f.handoffs(), 0);
+});
+
+test('local cancellation stops the longer prepared wait immediately', () => {
+    const f = fixture();
+    delete f.extension._startPreparedPolling;
+    f.extension._commitWrittenOperationId = f.status.operationId;
+    f.extension._startPreparedPolling(f.status.operationId);
+    f.extension._locallyCancelledOperationId = f.status.operationId;
+    assert.equal(f.timers.at(-1)(), false);
+    assert.equal(f.cancels(), 0);
+    assert.equal(f.handoffs(), 0);
+});
+
 test('shutdown status cannot replace the action from a confirmed request or local preflight', () => {
     for (const [binding, action] of ['request', 'local', 'both'].flatMap(binding =>
         ['restart', 'poweroff'].map(action => [binding, action]))) {
