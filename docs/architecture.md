@@ -24,7 +24,7 @@ Startup uses ordinary Shell chrome. Only the panel participates in pointer
 input; it does not acquire a modal grab. The primary monitor's usable area and
 scale determine the panel budget. Header, notices, and actions reserve space;
 only the job list scrolls. Stage grouping and progress normalization are pure
-functions exercised by the headless Node tests.
+functions exercised by the Node unit tests.
 
 Important-system and cleanup reports are independent inputs. They refresh their
 views without opening a hidden HUD or overriding startup eligibility. The HUD
@@ -44,6 +44,12 @@ painted ready frame, keeps the five-second countdown visible, writes a commit,
 then waits for the exact prepared marker. Only then does it invoke the saved
 native confirmation. A second native confirmation caused by another inhibitor
 continues the same prepared operation instead of starting a new checkpoint.
+
+The coordinator drains verified application units after countdown commit and
+before releasing its inhibitor, keeping the compositor available for native
+application exit. Its 30-second drain budget fits within the HUD's bounded
+35-second prepared-marker wait. Expiry withdraws handoff; it never substitutes
+for a prepared marker.
 
 Cancel withdraws local authorization before file I/O or backend recovery. Its
 operation remains fenced even if a late ready message arrives. Disabling the
@@ -65,3 +71,5 @@ release that inhibitor.
 The [file protocol](protocol.md) defines integration fields. Screenshots validate
 actual rendering, while the unit tests exercise authorization and failure paths;
 neither replaces a coordinated activation test on the target GNOME version.
+The [testing guide](testing.md) records the unit, isolated Shell and genuine VM
+shutdown coverage separately.

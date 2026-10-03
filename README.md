@@ -3,36 +3,16 @@
 A GNOME Shell 46 overlay showing desktop restoration and shutdown preparation.
 [Workspace State](https://github.com/Sage-Cat/workspace-state) supplies the progress.
 
-![Restoration progress](docs/images/startup.png)
-
-Native GNOME screenshot with example data. [All views](docs/screenshots.md).
-
-- Expand a job to see its progress and recent activity.
-- Review application problems in **Важливе**.
-- View cleanup results in **GC-профілі**; the HUD does not run cleanup.
-- Cancel shutdown while checkpoints are being prepared.
-
-Startup never grabs keyboard or pointer input. Shutdown waits for verified
-preparation before handing control back to GNOME.
+Expand jobs for progress, review application problems and cleanup reports, or
+cancel shutdown preparation. Startup never grabs keyboard or pointer input;
+shutdown requires a visible countdown and verified coordinator handoff.
 
 ## Install
 
-With Workspace State, use its [coordinated installer](https://github.com/Sage-Cat/workspace-state/blob/main/docs/deployment.md).
-For a standalone install, download the ZIP and `SHA256SUMS` from
-[Releases](https://github.com/Sage-Cat/login-hud/releases/latest):
-
-```sh
-sha256sum --check --ignore-missing SHA256SUMS
-gnome-extensions install --force login-hud-v2@sagecat.local.shell-extension.zip
-```
-
-Log out and back in, then enable it:
-
-```sh
-gnome-extensions enable login-hud-v2@sagecat.local
-```
-
-The HUD stays hidden until a producer supplies a valid current-session report.
+Use Workspace State's [coordinated installer](https://github.com/Sage-Cat/workspace-state/blob/main/docs/deployment.md),
+or follow the [standalone installation instructions](docs/operations.md#installation).
+Changed Shell code activates at the next login. The HUD stays hidden until it
+receives a valid report for that login.
 
 ## Build
 
@@ -48,6 +28,7 @@ The checked extension ZIP and checksum are written to `dist/`.
 ## Documentation
 
 - [Controls and troubleshooting](docs/operations.md)
+- [Testing, validation results and limits](docs/testing.md)
 - [Status file protocol](docs/protocol.md)
 - [Architecture](docs/architecture.md) · [PlantUML](docs/architecture.puml)
 - [Screenshots and capture commands](docs/screenshots.md)

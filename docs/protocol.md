@@ -109,6 +109,13 @@ status, visible allocated HUD, paint acknowledgement, countdown, commit, and
 prepared proof all agree. A terminal percentage or a stale ready file is
 insufficient.
 
+The prepared-marker wait starts after commit and is bounded to 35 seconds. The
+coordinator reserves at most 30 seconds for application shutdown before Shell
+teardown, leaving five seconds for handoff publication. The initial wait for
+preflight status is separate and remains 15 seconds. Timeout or local
+cancellation withdraws authorization; neither permits native handoff without
+the matching prepared evidence.
+
 ## Independent reports
 
 `alerts.json` has `schema_version: 1`, `sources`, and `incidents`, with scan and

@@ -1,5 +1,27 @@
 # Operation and troubleshooting
 
+## Installation
+
+With Workspace State, use its [coordinated installer](https://github.com/Sage-Cat/workspace-state/blob/main/docs/deployment.md)
+to activate compatible components together at the next login.
+
+For a standalone installation, download the extension ZIP and `SHA256SUMS` from
+[Releases](https://github.com/Sage-Cat/login-hud/releases/latest), then run:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+gnome-extensions install --force login-hud-v2@sagecat.local.shell-extension.zip
+```
+
+Log out and back in, then enable the extension:
+
+```sh
+gnome-extensions enable login-hud-v2@sagecat.local
+```
+
+Installation does not restart the desktop or prove that the new code is loaded.
+Use the read-only version checks below to distinguish installed and running code.
+
 ## Startup and status tabs
 
 The coordinator publishes complete reports for the current GNOME login. Login
@@ -46,9 +68,18 @@ retain GNOME's native shutdown behavior.
    grab is released even if writing cancellation fails. Backend recovery can
    remain visible; cancelling does not claim that recovery has completed.
 4. Once preparation is verified, the HUD must paint a ready frame and keep its
-   five-second countdown visible. The coordinator must then acknowledge the
-   exact commit with a prepared marker before GNOME receives the saved native
+   five-second countdown visible. After its commit, the coordinator closes
+   checkpointed applications while the compositor is still available. It must
+   publish the exact prepared marker before GNOME receives the saved native
    confirmation.
+
+The HUD waits at most 35 seconds after commit for that marker. This covers the
+coordinator's 30-second application-drain budget and a five-second publication
+margin; expiry cancels handoff instead of treating silence as success. Local
+cancellation remains immediate. If cancellation arrives after application
+closure began, prepared jobs can be recovered, but closed applications are not
+automatically reopened. Unverified recovery remains visible and blocks another
+attempt until it is resolved. See [testing and limits](testing.md).
 
 A failed step stops handoff, releases modal capture, and keeps its report visible
 with **Show full error log**. Use **Close** or Escape to dismiss the report.
