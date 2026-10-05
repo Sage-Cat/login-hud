@@ -48,6 +48,17 @@ The updated package passed **58 Node tests**. The real isolated GNOME suite
 passed **21 cases**, including Cancel → Close → a fresh completed retry with
 fewer rows, and refusal to commit an overall-ready report with a pending row.
 
+Final coordinated QEMU acceptance used HUD
+`afa9f9e4939a805d8e547ce35720902dc02662ae` with Workspace State
+`08ca75b0498506a5962c01ab1a457235e672fdaa`. Ordinary upgrade, retained/degraded
+slow-content restore, early native-stop cancellation/protected retry and a
+following ordinary cold boot all passed. The last three used the same runtime.
+The real retry showed a new 5.062-second countdown and restored the complete
+25-window workload without manual reconstruction. The previous pending-row
+failure remains a failed trial; a rendering workaround did not produce the pass.
+See [the complete matrix and limits](https://github.com/Sage-Cat/workspace-state/blob/main/docs/testing.md#final-coordinated-vm-acceptance).
+The working desktop was not rebooted; its next-login result is separate.
+
 ## Isolated GNOME Shell
 
 The integration harness lives in the sibling Workspace State repository.
