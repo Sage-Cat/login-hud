@@ -572,7 +572,9 @@ class LoginHud extends St.Widget {
         this._kicker.text = isShutdown
             ? 'SYSTEM / SHUTDOWN TELEMETRY'
             : 'SESSION / STARTUP TELEMETRY';
-        this._title.text = status.overallState === 'failed'
+        this._title.text = isShutdown && status.cancelled
+            ? 'System shutdown cancelled'
+            : status.overallState === 'failed'
             ? isShutdown ? 'System shutdown needs attention' : 'Session startup needs attention'
             : status.overallState === 'degraded'
                 ? isShutdown
@@ -2435,6 +2437,10 @@ export default class LoginHudExtension extends Extension {
         this._stopPreparedPolling();
         this._cancelShutdownCountdown();
         this._renderAckScheduledOperationId = null;
+        if (this._renderAckWrittenOperationId === status.operationId)
+            this._renderAckWrittenOperationId = null;
+        if (this._commitWrittenOperationId === status.operationId)
+            this._commitWrittenOperationId = null;
         this._locallyCancelledOperationId = status.operationId;
         if (hasFailure) {
             try {
@@ -2618,15 +2624,16 @@ export default class LoginHudExtension extends Extension {
                 if (eligible) {
                     this._installHudChrome();
                     this._hud.setStatus(parsed);
-                    if (parsed.mode === 'shutdown' && this._nativeHandoffOperationId === parsed.operationId) {
+                    const showShutdownProgress = this._shutdownStatusReady(parsed);
+                    if (showShutdownProgress && this._nativeHandoffOperationId === parsed.operationId) {
                         this._hud.setHandoffStarted(parsed.shutdownAction || this._preflightAction);
-                    } else if (parsed.mode === 'shutdown' && this._shutdownCountdownOperationId === parsed.operationId &&
+                    } else if (showShutdownProgress && this._shutdownCountdownOperationId === parsed.operationId &&
                         this._shutdownCountdownSeconds > 0) {
                         this._hud.setShutdownCountdown(
                             parsed.shutdownAction || this._preflightAction,
                             this._shutdownCountdownSeconds
                         );
-                    } else if (parsed.mode === 'shutdown' && this._commitWrittenOperationId === parsed.operationId &&
+                    } else if (showShutdownProgress && this._commitWrittenOperationId === parsed.operationId &&
                         parsed.shutdownOrigin === 'preflight') {
                         this._hud.setAwaitingPrepared(
                             parsed.shutdownAction || this._preflightAction

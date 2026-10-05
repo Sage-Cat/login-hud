@@ -30,6 +30,15 @@ regression confirms that 15, 25, 30 and 34.9 seconds do not prematurely cancel
 the 35-second wait, while expiry at 35 seconds cancels it. Local cancellation
 stops that wait immediately.
 
+An Oct5 real VM cancellation exposed stale presentation: after native stop jobs
+settled, the cancelled report was overwritten by an earlier committed
+"Ready to power off" overlay. New regression tests reproduce that stale commit
+and check failed stages, local cancellation and expired ownership. Progress
+overlays now require a currently ready, authorized operation; terminal reports
+clear matching old markers and render cancellation explicitly. Packaging and
+all **55 Node tests** passed. Final coordinated VM acceptance is recorded in
+[Workspace State's test report](https://github.com/Sage-Cat/workspace-state/blob/main/docs/testing.md).
+
 ## Isolated GNOME Shell
 
 The integration harness lives in the sibling Workspace State repository.

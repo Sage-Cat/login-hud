@@ -186,8 +186,9 @@ test('startup null identity never displays handoff while a matching shutdown sti
         const operationId = mode === 'shutdown' ? f.status.operationId : null;
         const raw = {schema_version: 1, mode, session_id: 'session',
             started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:01Z',
-            overall_state: 'running', overall_message: 'Restoring example windows',
-            error_log_path: '/tmp/example.txt', stages: [{id: 'example', state: 'running', message: 'Working'}],
+            overall_state: mode === 'shutdown' ? 'ready' : 'running', overall_message: 'Example progress',
+            error_log_path: '/tmp/example.txt', stages: [{id: 'example',
+                state: mode === 'shutdown' ? 'ready' : 'running', message: 'Example progress'}],
             ...(mode === 'shutdown' ? {operation_id: operationId, operation_context: f.status.operationContext,
                 shutdown_origin: 'preflight', shutdown_action: 'poweroff'} : {})};
         const handoffs = [];
@@ -213,6 +214,68 @@ test('startup null identity never displays handoff while a matching shutdown sti
         assert.equal(f.extension._lastGoodStatus.shutdownOrigin, mode === 'shutdown' ? 'preflight' : null);
         assert.deepEqual(notices, []);
         assert.deepEqual(handoffs, mode === 'shutdown' ? ['poweroff'] : []);
+    }
+});
+
+test('terminal or withdrawn shutdown never restores stale committed progress overlays', () => {
+    for (const overlay of ['prepared', 'countdown', 'handoff']) {
+        for (const change of ['cancelled', 'failed', 'failed-stage', 'local-cancel', 'expired']) {
+            const f = fixture();
+            const raw = {schema_version: 1, mode: 'shutdown', session_id: 'session',
+                operation_id: f.status.operationId, operation_context: {...f.status.operationContext},
+                shutdown_origin: 'preflight', shutdown_action: 'poweroff',
+                started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:01Z',
+                overall_state: change === 'failed' ? 'failed' : 'ready',
+                cancelled: change === 'cancelled', overall_message: 'Shutdown stopped', error_log_path: null,
+                stages: [{id: 'proof', state: change === 'failed-stage' ? 'failed' : 'ready', message: 'Stopped'}]};
+            const decorated = [];
+            if (change === 'expired')
+                f.clock(1001);
+            Object.assign(f.extension, {
+                _loadSerial: 0, _activeSessionId: 'session', _activeMode: 'shutdown',
+                _activeStartedAt: raw.started_at,
+                _preflightOperationId: f.status.operationId, _preflightAction: 'poweroff',
+                _commitWrittenOperationId: f.status.operationId,
+                _renderAckWrittenOperationId: f.status.operationId,
+                _nativeHandoffOperationId: overlay === 'handoff' ? f.status.operationId : null,
+                _shutdownCountdownOperationId: overlay === 'countdown' ? f.status.operationId : null,
+                _shutdownCountdownSeconds: overlay === 'countdown' ? 3 : 0,
+                _locallyCancelledOperationId: change === 'local-cancel' ? f.status.operationId : null,
+                _syncVisibility() {}, _installHudChrome() {}, _readProtocolFileSync: () => null,
+                _cancelNativeEndSessionOnce() {},
+                _statusFile: {load_contents_async(_cancel, callback) { callback(this, {}); },
+                    load_contents_finish() { return [true, new TextEncoder().encode(JSON.stringify(raw))]; }},
+            });
+            for (const method of ['setAwaitingPrepared', 'setShutdownCountdown', 'setHandoffStarted'])
+                f.extension._hud[method] = () => decorated.push(method);
+            f.extension._loadStatus();
+            assert.equal(f.extension._lastGoodStatus.cancelled, raw.cancelled, `${overlay}/${change}`);
+            assert.deepEqual(decorated, [], `${overlay}/${change}`);
+            if (['cancelled', 'failed', 'failed-stage'].includes(change)) {
+                assert.equal(f.extension._commitWrittenOperationId, null, `${overlay}/${change}`);
+                assert.equal(f.extension._renderAckWrittenOperationId, null, `${overlay}/${change}`);
+            }
+            assert.equal(f.handoffs(), 0);
+        }
+    }
+});
+
+test('cancelled completion renders cancellation rather than readiness', () => {
+    const {LoginHud} = runInNewContext(
+        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+            '\n;({LoginHud});', {
+            GObject: {registerClass: cls => cls}, St: {Widget: class {}}, Extension: class {},
+        });
+    for (const overallState of ['ready', 'degraded', 'failed']) {
+        const hud = Object.assign(Object.create(LoginHud.prototype), {
+            _kicker: {}, _title: {}, _overall: {}, _overallProgressLabel: {},
+            scheduleProgressFill() {}, _renderTabs() {}, _renderContent() {},
+            _renderActions() {}, _refreshElapsed() {}, _renderNotice() {},
+        });
+        hud.setStatus({mode: 'shutdown', cancelled: true, overallState,
+            overallMessage: 'Prepared jobs recovered', stages: []});
+        assert.equal(hud._title.text, 'System shutdown cancelled');
+        assert.equal(hud._overall.text, 'System shutdown: Prepared jobs recovered');
     }
 });
 
