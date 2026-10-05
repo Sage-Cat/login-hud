@@ -130,6 +130,24 @@ function groupStages(stages) {
     return jobs;
 }
 
+function shutdownRecoveryPending(status, locallyCancelled = false) {
+    if (status?.mode !== 'shutdown')
+        return false;
+    if (status.recoveryPending === true ||
+        ['cancelling', 'recovering', 'recovery-failed'].includes(status.operationState))
+        return true;
+    // A scoped terminal publication can settle recovery even when untouched
+    // category rows still say pending. A stale prepared report cannot settle
+    // a later local cancellation merely because recovery was previously false.
+    if (status.operationContext && status.recoveryPending === false &&
+        ['completed', 'cancelled', 'failed'].includes(status.operationState))
+        return false;
+    if (locallyCancelled && !status.cancelled)
+        return true;
+    return status.stages.length > 0 &&
+        status.stages.some(stage => !TERMINAL_STATES.has(stage.state));
+}
+
 function operationContext(raw, mode, operationId) {
     if (raw === undefined)
         return null; // Old status remains presentation-only during upgrades.
@@ -250,6 +268,8 @@ function normaliseStatus(raw) {
         mode,
         operationId,
         operationContext: operationContext(raw.operation_context, mode, operationId),
+        operationState: text(raw.operation_state) || null,
+        recoveryPending: typeof raw.recovery_pending === 'boolean' ? raw.recovery_pending : null,
         shutdownAction,
         shutdownOrigin,
         shutdownActionExplicit: raw.shutdown_action !== undefined,
@@ -1084,7 +1104,7 @@ class LoginHud extends St.Widget {
                     text: 'Shutdown stopped · review the error and retry power off',
                 }));
             }
-            this._addCloseButton(status.mode === 'shutdown' && !allTerminal
+            this._addCloseButton(status.mode === 'shutdown' && shutdownRecoveryPending(status)
                 ? 'Hide (recovery continues)' : 'Close');
         } else if (status.mode === 'shutdown' && this._handoffStarted) {
             this._actions.add_child(new St.Label({
@@ -1106,7 +1126,7 @@ class LoginHud extends St.Widget {
             this._actions.add_child(button);
             this._primaryAction = button;
         } else if (status.mode === 'shutdown' && status.cancelled) {
-            this._addCloseButton(allTerminal ? 'Close' : 'Hide (recovery continues)');
+            this._addCloseButton(shutdownRecoveryPending(status) ? 'Hide (recovery continues)' : 'Close');
         } else if (allTerminal && status.mode !== 'shutdown') {
             this._addCloseButton('OK', true);
         }
@@ -1146,7 +1166,8 @@ export default class LoginHudExtension extends Extension {
                     }, visible: Boolean(this._hud?.visible), modal: Boolean(this._modalGrab),
                     operation_context: this._lastGoodStatus?.operationContext ?? null,
                     local_cancelled: this._isLocallyCancelled(this._lastGoodStatus),
-                    recovery_pending: this._isLocallyCancelled(this._lastGoodStatus) && !this._lastGoodStatus?.cancelled,
+                    recovery_pending: shutdownRecoveryPending(this._lastGoodStatus,
+                        this._isLocallyCancelled(this._lastGoodStatus)),
                     cancel_request_written: Boolean(this._cancelRequestPending)}),
                 });
             this._diagnostics.export(Gio.DBus.session, '/org/sagecat/LoginHud');
@@ -2647,7 +2668,9 @@ export default class LoginHudExtension extends Extension {
                     !this._isLocallyCancelled(parsed))
                     this._hud.setTransportNotice('Shutdown is stopped: operation context is expired or belongs to another login.');
                 else if (this._isLocallyCancelled(parsed) && !parsed.cancelled)
-                    this._hud.setTransportNotice('Shutdown authorization withdrawn. Backend recovery remains pending; desktop input is released.');
+                    this._hud.setTransportNotice(shutdownRecoveryPending(parsed, true)
+                        ? 'Shutdown authorization withdrawn. Backend recovery remains pending; desktop input is released.'
+                        : 'Shutdown is stopped; desktop input is released. Review the reported error before retrying.');
                 this._handleTerminalShutdownStatus(parsed);
             } catch (error) {
                 if (error.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND)) {

@@ -39,6 +39,15 @@ clear matching old markers and render cancellation explicitly. Packaging and
 all **55 Node tests** passed. Final coordinated VM acceptance is recorded in
 [Workspace State's test report](https://github.com/Sage-Cat/workspace-state/blob/main/docs/testing.md).
 
+A later retry timeout was traced to three backend category stages left pending
+when a sealed checkpoint was reused. The real renderer correctly withheld
+acknowledgement; it needed no layout workaround. Scoped terminal failures now
+report completed backend recovery accurately, including Close/Hide and the
+diagnostic endpoint. Unscoped or still-recovering reports remain conservative.
+The updated package passed **58 Node tests**. The real isolated GNOME suite
+passed **21 cases**, including Cancel → Close → a fresh completed retry with
+fewer rows, and refusal to commit an overall-ready report with a pending row.
+
 ## Isolated GNOME Shell
 
 The integration harness lives in the sibling Workspace State repository.

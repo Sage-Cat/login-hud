@@ -260,6 +260,33 @@ test('terminal or withdrawn shutdown never restores stale committed progress ove
     }
 });
 
+test('settled failed backend does not display pending recovery on repeated publication', () => {
+    const f = fixture();
+    const raw = {schema_version: 1, mode: 'shutdown', session_id: 'session',
+        operation_id: f.status.operationId, operation_context: f.status.operationContext,
+        shutdown_origin: 'preflight', shutdown_action: 'poweroff',
+        started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:01Z',
+        overall_state: 'failed', overall_message: 'HUD did not commit', error_log_path: null,
+        operation_state: 'failed', recovery_pending: false, cancelled: false,
+        stages: [{id: 'proof', state: 'failed', message: 'No commit received'},
+            {id: 'social-apps-save', state: 'pending', message: 'Not started'}]};
+    const notices = [];
+    Object.assign(f.extension, {
+        _loadSerial: 0, _preflightOperationId: f.status.operationId, _preflightAction: 'poweroff',
+        _syncVisibility() {}, _installHudChrome() {}, _readProtocolFileSync: () => null,
+        _cancelNativeEndSessionOnce() {},
+        _statusFile: {load_contents_async(_cancel, callback) { callback(this, {}); },
+            load_contents_finish() { return [true, new TextEncoder().encode(JSON.stringify(raw))]; }},
+    });
+    f.extension._hud.setTransportNotice = message => notices.push(message);
+    f.extension._loadStatus();
+    assert.equal(f.extension._isLocallyCancelled(f.extension._lastGoodStatus), true);
+    f.extension._loadStatus();
+    assert.ok(notices.length > 0);
+    assert.ok(notices.every(message => !message.includes('recovery remains pending')));
+    assert.equal(f.handoffs(), 0);
+});
+
 test('cancelled completion renders cancellation rather than readiness', () => {
     const {LoginHud} = runInNewContext(
         source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
@@ -518,5 +545,35 @@ test('failed shutdown actions offer logs and dismissal while recovery can contin
         assert.ok(button);
         button.activate();
         assert.equal(closed, 1);
+    }
+});
+
+test('settled failure offers Close even with unstarted categories, while recovery ownership stays visible', () => {
+    class Actor {
+        constructor(props) { Object.assign(this, props); }
+        connect(_signal, callback) { this.activate = callback; }
+    }
+    const {LoginHud} = runInNewContext(
+        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+            '\n;({LoginHud});', {
+            GObject: {registerClass: cls => cls},
+            St: {Widget: class {}, Button: Actor, Label: Actor}, Extension: class {},
+        });
+    for (const [operationState, recoveryPending, expected] of [
+        ['failed', false, 'Close'], ['cancelled', false, 'Close'],
+        ['recovering', true, 'Hide (recovery continues)'],
+        ['recovery-failed', true, 'Hide (recovery continues)'],
+    ]) {
+        const actions = [];
+        const hud = Object.assign(Object.create(LoginHud.prototype), {
+            scheduleProgressFill() {},
+            _actions: {destroy_all_children() {}, add_child(actor) { actions.push(actor); }},
+        });
+        hud._renderActions({mode: 'shutdown', overallState: 'failed', cancelled: true,
+            operationState, recoveryPending,
+            operationContext: {boot_id: 'boot', login_generation: 'session', operation_id: 'a'.repeat(32),
+                mode: 'shutdown', attempt: 1, deadline: 100},
+            stages: [{state: 'failed'}, {state: 'pending'}]});
+        assert.ok(actions.some(actor => actor.label === expected), operationState);
     }
 });
