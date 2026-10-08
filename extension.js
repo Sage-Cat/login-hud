@@ -982,6 +982,7 @@ export default class LoginHudExtension extends Extension {
             status?.stages.some(stage => stage.state === 'failed');
         return status?.mode === 'shutdown' && !status.cancelled && !hasFailure &&
             this._hasShutdownAuthority(status) &&
+            ['prepared', 'authorized'].includes(status.operationState) &&
             ['ready', 'degraded'].includes(status.overallState) &&
             status.operationId !== this._locallyCancelledOperationId &&
             status.stages.length > 0 &&

@@ -34,7 +34,7 @@ function fixture() {
     const extension = Object.create(LoginHudExtension.prototype);
     const status = {mode: 'shutdown', overallState: 'ready', operationId: 'a'.repeat(32),
         sessionId: 'session', shutdownOrigin: 'preflight', shutdownAction: 'poweroff',
-        stages: [{state: 'ready'}], cancelled: false,
+        operationState: 'prepared', stages: [{state: 'ready'}], cancelled: false,
         operationContext: {boot_id: 'boot', login_generation: 'session', operation_id: 'a'.repeat(32),
             mode: 'shutdown', attempt: 1, deadline: 1000}};
     const panel = {mapped: true, width: 800, height: 800};
@@ -61,6 +61,7 @@ function shutdownReport(status, fields = {}) {
     return {schema_version: 1, mode: 'shutdown', session_id: status.sessionId,
         operation_id: status.operationId, operation_context: status.operationContext,
         shutdown_origin: 'preflight', shutdown_action: status.shutdownAction,
+        operation_state: status.operationState,
         started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:01Z',
         overall_state: 'ready', overall_message: 'Shutdown progress', error_log_path: null,
         stages: [{id: 'proof', state: 'ready', message: 'Verified'}], ...fields};
@@ -140,6 +141,55 @@ test('all jobs terminal is insufficient while overall verification is running', 
     assert.equal(f.commits(), 0);
 });
 
+test('completed capture rows wait for prepared lifecycle before countdown and native handoff', () => {
+    for (const operationState of ['preparing', undefined]) {
+        const f = fixture();
+        const raw = shutdownReport(f.status, {operation_state: operationState,
+            stages: [{id: 'desktop-capture', state: 'ready', message: 'Desktop captured'},
+                {id: 'terminal-capture', state: 'ready', message: 'Terminals captured'}]});
+        bindReport(f, raw, {schema_version: 1, session_id: 'session',
+            operation_id: f.status.operationId, action: 'poweroff'});
+        const writes = [];
+        f.extension._writeProtocolFile = (_file, prefix) => writes.push(prefix);
+        // Keep the already-owned modal, as in a cancellable capture in progress.
+        f.extension._modalGrab = {};
+        f.extension._loadStatus();
+        const preparing = f.extension._lastGoodStatus;
+        assert.equal(f.extension._shutdownStatusReady(preparing), false);
+        assert.equal(f.extension._shutdownCountdownOperationId, null);
+        assert.equal(f.timers.length, 0);
+        assert.equal(f.paints.length, 0);
+        f.extension._commitShutdown(preparing);
+        f.extension._commitWrittenOperationId = preparing.operationId;
+        f.extension._handoffToGnome(preparing);
+        assert.deepEqual(writes, []);
+        assert.equal(f.handoffs(), 0);
+        f.extension._commitWrittenOperationId = null;
+
+        raw.operation_state = 'prepared';
+        f.extension._loadStatus();
+        const prepared = f.extension._lastGoodStatus;
+        assert.equal(f.extension._shutdownStatusReady(prepared), true);
+        f.timers[0]();
+        f.paints[0]();
+        assert.deepEqual(writes, ['shutdown-hud-rendered']);
+        assert.equal(f.extension._shutdownCountdownOperationId, prepared.operationId);
+        f.paints[1]();
+        f.clock(5.1);
+        f.timers[1]();
+        assert.deepEqual(writes, ['shutdown-hud-rendered', 'shutdown-commit']);
+        assert.equal(f.handoffs(), 0);
+
+        raw.operation_state = 'authorized';
+        f.extension._loadStatus();
+        const authorized = f.extension._lastGoodStatus;
+        assert.equal(f.extension._shutdownStatusReady(authorized), true);
+        f.extension._handoffToGnome(authorized);
+        f.extension._handoffToGnome(authorized);
+        assert.equal(f.handoffs(), 1);
+    }
+});
+
 test('prepared wait covers app drain but still cancels an unresponsive coordinator', () => {
     const f = fixture();
     delete f.extension._startPreparedPolling;
@@ -179,6 +229,7 @@ test('shutdown status cannot replace the action from a confirmed request or loca
         const f = fixture();
         const raw = {schema_version: 1, mode: 'shutdown', session_id: 'session',
             operation_id: f.status.operationId, shutdown_origin: 'preflight', shutdown_action: action,
+            operation_state: 'prepared',
             started_at: '2026-09-25T00:00:00Z', updated_at: '2026-09-25T00:00:01Z',
             overall_state: 'ready', overall_message: 'Ready', error_log_path: '/tmp/log',
             stages: [{id: 'proof', state: 'ready', message: 'Verified'}]};
@@ -360,7 +411,7 @@ test('startup null identity never displays handoff while a matching shutdown sti
             error_log_path: '/tmp/example.txt', stages: [{id: 'example',
                 state: mode === 'shutdown' ? 'ready' : 'running', message: 'Example progress'}],
             ...(mode === 'shutdown' ? {operation_id: operationId, operation_context: f.status.operationContext,
-                shutdown_origin: 'preflight', shutdown_action: 'poweroff'} : {})};
+                shutdown_origin: 'preflight', shutdown_action: 'poweroff', operation_state: 'authorized'} : {})};
         const handoffs = [];
         const notices = [];
         Object.assign(f.extension, {
@@ -394,6 +445,7 @@ test('terminal or withdrawn shutdown never restores stale committed progress ove
             const raw = {schema_version: 1, mode: 'shutdown', session_id: 'session',
                 operation_id: f.status.operationId, operation_context: {...f.status.operationContext},
                 shutdown_origin: 'preflight', shutdown_action: 'poweroff',
+                operation_state: 'prepared',
                 started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:01Z',
                 overall_state: change === 'failed' ? 'failed' : 'ready',
                 cancelled: change === 'cancelled', overall_message: 'Shutdown stopped', error_log_path: null,

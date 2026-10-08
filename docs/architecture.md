@@ -74,6 +74,8 @@ Shutdown status and native dialog actions share one operation binding. A stale
 failure cannot replace a newer preflight or cancel its dialog; unbound historical
 failures stay passive. Local withdrawal survives disable/re-enable even if the
 cancellation file cannot be written.
+The countdown requires the coordinator's prepared state after workspace capture
+finishes; it does not depend on a separate integrity row.
 
 The [file protocol](protocol.md) defines integration fields. Screenshots validate
 actual rendering, while the unit tests exercise authorization and failure paths;
