@@ -1,1150 +1,29 @@
 /* exported default */
 /* global console TextEncoder */
 
-import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import GObject from 'gi://GObject';
 import Shell from 'gi://Shell';
+import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
-import {Spinner} from 'resource:///org/gnome/shell/ui/animation.js';
 import {State as ModalDialogState} from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import {BUILD_REVISION} from './buildInfo.js';
-
-const STATUS_DIRECTORY = 'workspace-state';
-const STATUS_FILENAME = 'login-hud-status.json';
-const ALERTS_FILENAME = 'alerts.json';
-const GC_STATUS_FILENAME = 'status.json';
-const DISMISSED_FILENAME = 'startup-hud-dismissed.json';
-const CANCEL_FILENAME = 'shutdown-cancel.json';
-const REQUEST_FILENAME = 'shutdown-request.json';
-const RENDERED_FILENAME = 'shutdown-hud-rendered.json';
-const COMMIT_FILENAME = 'shutdown-commit.json';
-const PREPARED_FILENAME = 'shutdown-prepared.json';
-const SESSION_MANAGER_NAME = 'org.gnome.SessionManager';
-const SHUTDOWN_COORDINATOR_UNIT = 'wsctl-gnome-session.service';
-const DBUS_NAME = 'org.freedesktop.DBus';
-const DBUS_PATH = '/org/freedesktop/DBus';
-const DBUS_INTERFACE = 'org.freedesktop.DBus';
-const SYSTEMD_NAME = 'org.freedesktop.systemd1';
-const SYSTEMD_PATH = '/org/freedesktop/systemd1';
-const SYSTEMD_MANAGER_INTERFACE = 'org.freedesktop.systemd1.Manager';
-const SYSTEMD_UNIT_INTERFACE = 'org.freedesktop.systemd1.Unit';
-const PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties';
-const STATES = new Set([
-    'pending', 'waiting', 'running', 'ready', 'degraded', 'failed', 'skipped',
-]);
-const TERMINAL_STATES = new Set(['ready', 'degraded', 'failed', 'skipped']);
-const MODES = new Set(['startup', 'shutdown']);
-const SHUTDOWN_ACTIONS = new Set(['poweroff', 'restart']);
-const SHUTDOWN_ORIGINS = new Set(['preflight']);
-const SHUTDOWN_COUNTDOWN_SECONDS = 5;
-const PREFLIGHT_STATUS_TIMEOUT_MS = 15000;
-// The coordinator has a 30-second app-drain budget after countdown commit.
-// Keep a bounded margin for publishing its result before cancelling handoff.
-const PREPARED_POLL_TIMEOUT_MS = 35000;
-const STALE_STARTUP_PRESENTATION_MS = 5 * 60 * 1000;
-const GC_STALE_AFTER_MS = 30 * 1000;
-const GC_FUTURE_TOLERANCE_MS = 5 * 1000;
-const GC_MAX_STATUS_BYTES = 2 * 1024 * 1024;
-const GC_MAX_PROFILES = 256;
-const GC_STATES = new Set(['pending', 'running', 'ok', 'failed', 'disabled']);
-
-function text(value, fallback = '') {
-    return typeof value === 'string' && value.length > 0 ? value : fallback;
-}
-
-function fraction(value) {
-    if (typeof value !== 'number' || !Number.isFinite(value))
-        return null;
-    return Math.max(0, Math.min(1, value));
-}
-
-function stageProgress(stage) {
-    if (stage.fraction !== null)
-        return stage.fraction;
-    return TERMINAL_STATES.has(stage.state) ? 1 : 0;
-}
-
-function aggregateState(stages) {
-    const states = stages.map(stage => stage.state);
-    if (states.includes('failed'))
-        return 'failed';
-    if (states.includes('running'))
-        return 'running';
-    if (states.includes('waiting'))
-        return 'waiting';
-    if (states.includes('pending'))
-        return 'pending';
-    if (states.includes('degraded'))
-        return 'degraded';
-    if (states.every(state => state === 'skipped'))
-        return 'skipped';
-    return 'ready';
-}
-
-function groupStages(stages) {
-    const jobs = [];
-    const groups = new Map();
-    for (const stage of stages) {
-        if (!stage.groupId) {
-            jobs.push({...stage, children: []});
-            continue;
-        }
-        let group = groups.get(stage.groupId);
-        if (!group) {
-            group = {
-                id: `group:${stage.groupId}`,
-                name: stage.groupLabel || stage.groupId,
-                groupId: stage.groupId,
-                children: [],
-                events: [],
-            };
-            groups.set(stage.groupId, group);
-            jobs.push(group);
-        }
-        group.children.push(stage);
-    }
-
-    for (const group of groups.values()) {
-        group.state = aggregateState(group.children);
-        group.fraction = group.children.reduce(
-            (sum, child) => sum + stageProgress(child), 0
-        ) / group.children.length;
-        const finished = group.children.filter(child => TERMINAL_STATES.has(child.state)).length;
-        const active = group.children.find(child => child.state === 'failed') ||
-            group.children.find(child => child.state === 'running') ||
-            group.children.find(child => child.state === 'waiting') ||
-            group.children.find(child => child.state === 'pending');
-        group.message = `${finished}/${group.children.length} steps complete`;
-        if (active)
-            group.message += ` · ${active.name}: ${active.message}`;
-        group.events = group.children.flatMap(child => child.events.map(event => ({
-            ...event,
-            source: child.name,
-        }))).sort((left, right) => left.at.localeCompare(right.at)).slice(-64);
-    }
-    return jobs;
-}
-
-function shutdownRecoveryPending(status, locallyCancelled = false) {
-    if (status?.mode !== 'shutdown')
-        return false;
-    if (status.recoveryPending === true ||
-        ['cancelling', 'recovering', 'recovery-failed'].includes(status.operationState))
-        return true;
-    // A scoped terminal publication can settle recovery even when untouched
-    // category rows still say pending. A stale prepared report cannot settle
-    // a later local cancellation merely because recovery was previously false.
-    if (status.operationContext && status.recoveryPending === false &&
-        ['completed', 'cancelled', 'failed'].includes(status.operationState))
-        return false;
-    if (locallyCancelled && !status.cancelled)
-        return true;
-    return status.stages.length > 0 &&
-        status.stages.some(stage => !TERMINAL_STATES.has(stage.state));
-}
-
-function operationContext(raw, mode, operationId) {
-    if (raw === undefined)
-        return null; // Old status remains presentation-only during upgrades.
-    const fields = ['boot_id', 'login_generation', 'operation_id', 'mode', 'attempt', 'deadline'];
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
-        Object.keys(raw).length !== fields.length || fields.some(field => !(field in raw)) ||
-        ['boot_id', 'login_generation', 'operation_id'].some(field =>
-            typeof raw[field] !== 'string' || !raw[field]) ||
-        raw.mode !== mode || (operationId && raw.operation_id !== operationId) ||
-        !Number.isInteger(raw.attempt) || raw.attempt < 1 ||
-        !Number.isFinite(raw.deadline) || raw.deadline <= 0)
-        throw new Error('Invalid operation context.');
-    return Object.freeze(Object.fromEntries(fields.map(field => [field, raw[field]])));
-}
-
-function sameOperationContext(left, right) {
-    return Boolean(left && right) && Object.keys(left).length === 6 &&
-        Object.keys(right).length === 6 && ['boot_id', 'login_generation', 'operation_id',
-        'mode', 'attempt', 'deadline'].every(field => left[field] === right[field]);
-}
-
-function gcViewKey(profiles, error) {
-    return JSON.stringify({error, data: profiles ? {
-        profiles: profiles.profiles, stale: profiles.stale, truncated: profiles.truncated,
-        daemonAvailable: profiles.daemonAvailable,
-    } : null});
-}
-
-function normaliseStatus(raw) {
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
-        throw new Error('The status document must be a JSON object.');
-
-    if (raw.schema_version !== 1)
-        throw new Error(`Unsupported status schema version: ${String(raw.schema_version)}.`);
-
-    const mode = raw.mode ?? 'startup';
-    if (!MODES.has(mode))
-        throw new Error(`Unknown HUD mode: ${String(mode)}.`);
-
-    const required = [
-        'session_id', 'started_at', 'updated_at', 'overall_state', 'overall_message',
-        'stages', 'error_log_path',
-    ];
-    for (const field of required) {
-        if (!(field in raw))
-            throw new Error(`The status document is missing ${field}.`);
-    }
-    if (!STATES.has(raw.overall_state))
-        throw new Error(`Unknown overall state: ${String(raw.overall_state)}.`);
-    if (!Array.isArray(raw.stages))
-        throw new Error('The stages field must be an array.');
-    const operationId = mode === 'shutdown' ? text(raw.operation_id) : null;
-    if (mode === 'shutdown' && !operationId)
-        throw new Error('The shutdown status is missing operation_id.');
-    const shutdownAction = mode === 'shutdown' && SHUTDOWN_ACTIONS.has(raw.shutdown_action)
-        ? raw.shutdown_action : null;
-    const shutdownOrigin = mode === 'shutdown' && SHUTDOWN_ORIGINS.has(raw.shutdown_origin)
-        ? raw.shutdown_origin : null;
-    if (mode === 'shutdown' && !shutdownAction)
-        throw new Error(`Unknown shutdown action: ${String(raw.shutdown_action)}.`);
-    if (mode === 'shutdown' && !SHUTDOWN_ORIGINS.has(raw.shutdown_origin))
-        throw new Error(`Unknown shutdown origin: ${String(raw.shutdown_origin)}.`);
-
-    const stages = raw.stages.slice(0, 64).map((item, index) => {
-        if (item === null || typeof item !== 'object' || Array.isArray(item))
-            throw new Error(`Stage ${index + 1} must be an object.`);
-        for (const field of ['id', 'state', 'message']) {
-            if (!(field in item))
-                throw new Error(`Stage ${index + 1} is missing ${field}.`);
-        }
-        if (!STATES.has(item.state))
-            throw new Error(`Stage ${index + 1} has an unknown state.`);
-        const input = item;
-        const explicitFraction = fraction(input.fraction);
-        const countedFraction = typeof input.current === 'number' &&
-            typeof input.total === 'number' && input.total > 0
-            ? fraction(input.current / input.total) : null;
-        const events = Array.isArray(input.events)
-            ? input.events.slice(-32).flatMap(event => {
-                if (event === null || typeof event !== 'object' || Array.isArray(event))
-                    return [];
-                const eventState = STATES.has(event.state) ? event.state : input.state;
-                const message = text(event.message);
-                if (!message)
-                    return [];
-                return [{
-                    at: text(event.at),
-                    state: eventState,
-                    message,
-                    source: '',
-                }];
-            })
-            : [];
-        return {
-            id: text(input.id, `stage-${index + 1}`),
-            name: text(input.name, text(input.label, `Stage ${index + 1}`)),
-            state: input.state,
-            message: text(input.message),
-            fraction: explicitFraction ?? countedFraction,
-            groupId: text(input.group_id) || null,
-            groupLabel: text(input.group_label),
-            events,
-        };
-    });
-    const jobs = groupStages(stages);
-
-    return {
-        schemaVersion: 1,
-        sessionId: text(raw.session_id, 'unknown session'),
-        startedAt: text(raw.started_at),
-        updatedAt: text(raw.updated_at),
-        overallState: raw.overall_state,
-        overallMessage: text(raw.overall_message,
-            mode === 'shutdown' ? 'Saving your workspace…' : 'Preparing your session…'),
-        errorLogPath: typeof raw.error_log_path === 'string' && raw.error_log_path.startsWith('/')
-            ? raw.error_log_path : null,
-        stages: jobs,
-        mode,
-        operationId,
-        operationContext: operationContext(raw.operation_context, mode, operationId),
-        operationState: text(raw.operation_state) || null,
-        recoveryPending: typeof raw.recovery_pending === 'boolean' ? raw.recovery_pending : null,
-        shutdownAction,
-        shutdownOrigin,
-        shutdownActionExplicit: raw.shutdown_action !== undefined,
-        shutdownOriginExplicit: raw.shutdown_origin !== undefined,
-        cancelled: raw.cancelled === true,
-        showOnStartup: raw.show_startup_hud !== false,
-    };
-}
-
-function elapsedSince(isoTimestamp) {
-    const began = Date.parse(isoTimestamp);
-    if (!Number.isFinite(began))
-        return 'Elapsed —';
-
-    const seconds = Math.max(0, Math.floor((Date.now() - began) / 1000));
-    const minutes = Math.floor(seconds / 60);
-    const remainder = seconds % 60;
-    return minutes > 0
-        ? `Elapsed ${minutes}m ${String(remainder).padStart(2, '0')}s`
-        : `Elapsed ${remainder}s`;
-}
-
-function displayState(value) {
-    return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function eventTime(value) {
-    const parsed = Date.parse(value);
-    if (!Number.isFinite(parsed))
-        return '--:--:--';
-    return new Date(parsed).toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-    });
-}
-
-function stateIcon(value) {
-    switch (value) {
-    case 'ready':
-        return 'object-select-symbolic';
-    case 'degraded':
-        return 'dialog-warning-symbolic';
-    case 'failed':
-        return 'dialog-error-symbolic';
-    case 'skipped':
-        return 'media-skip-forward-symbolic';
-    case 'running':
-        return 'system-run-symbolic';
-    default:
-        return 'go-next-symbolic';
-    }
-}
-
-function overallFraction(stages) {
-    if (stages.length === 0)
-        return 0;
-    const total = stages.reduce((sum, stage) => {
-        if (stage.fraction !== null)
-            return sum + stage.fraction;
-        return sum + (TERMINAL_STATES.has(stage.state) ? 1 : 0);
-    }, 0);
-    return total / stages.length;
-}
-
-// Work-area coordinates are stage pixels; St CSS lengths are logical pixels.
-function normalizeAlerts(raw) {
-    if (raw?.schema_version !== 1 || !Array.isArray(raw.sources) ||
-        !Array.isArray(raw.incidents) || raw.sources.length > 64 || raw.incidents.length > 200)
-        throw new Error('Invalid owned-system report');
-    const sources = raw.sources.filter(source => source && typeof source === 'object' &&
-        source.ownership === 'first-party' && typeof source.id === 'string' &&
-        /^[a-z0-9][a-z0-9_.-]{0,79}$/.test(source.id) && typeof source.label === 'string').map(source => ({
-        ...source, label: source.label.slice(0, 120), host: String(source.host ?? 'local').slice(0, 80),
-        source_ref: String(source.source_ref ?? '').slice(0, 300),
-        detail: String(source.detail ?? '').slice(0, 1500),
-    }));
-    const ids = new Set(sources.map(source => source.id));
-    const severities = {"auth-required": "blocker", "service-failed": "critical",
-        "service-unavailable": "blocker", "restart-loop": "critical", "plugin-failed": "critical", "critical-log": "critical"};
-    const incidents = raw.incidents.filter(item => item && typeof item === 'object' && ids.has(item.source) &&
-        typeof item.code === 'string' &&
-        /^[a-z0-9][a-z0-9_.-]{0,79}$/.test(item.code) &&
-        typeof item.message === 'string' && (item.active === true || item.active === 1) &&
-        ['blocker', 'critical'].includes(item.severity ?? severities[item.code])).map(item => ({
-        ...item, severity: item.severity ?? severities[item.code] ?? 'warning', active: true, acknowledged: Boolean(item.acknowledged),
-        message: item.message.slice(0, 300), detail: String(item.detail ?? '').slice(0, 1500),
-    }));
-    const lastScan = Date.parse(raw.last_scan_at ?? '');
-    return {sources, incidents, updatedAt: String(raw.last_scan_at ?? ''),
-        stale: !raw.boot_id || raw.last_scan_boot_id !== raw.boot_id ||
-            !Number.isFinite(lastScan) || Date.now() - lastScan > 15 * 60 * 1000,
-        scanning: raw.scanning === true, scanError: String(raw.scan_error ?? '').slice(0, 500),
-        incomplete: raw.verification_incomplete === true,
-        unread: incidents.filter(item => !item.acknowledged).length,
-        total: incidents.length};
-}
-
-function safeGcName(value, fallback) {
-    if (typeof value !== 'string')
-        return fallback;
-    const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
-    return cleaned ? cleaned.slice(0, 160) : fallback;
-}
-
-function gcTimestamp(value) {
-    return value === null ? null : typeof value === 'string' && Number.isFinite(Date.parse(value))
-        ? value : null;
-}
-
-function normalizeGcProfiles(raw, now = Date.now()) {
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw) ||
-        raw.schema_version !== 1 || typeof raw.updated_at !== 'string' ||
-        !Number.isFinite(Date.parse(raw.updated_at)) ||
-        raw.daemon === null || typeof raw.daemon !== 'object' || Array.isArray(raw.daemon) ||
-        !['running', 'stopped'].includes(raw.daemon.state) ||
-        !Number.isInteger(raw.daemon.pid) || raw.daemon.pid < 0 ||
-        !Array.isArray(raw.profiles))
-        throw new Error('Некоректний звіт GC-профілів.');
-    const age = now - Date.parse(raw.updated_at);
-    const stale = age > GC_STALE_AFTER_MS || age < -GC_FUTURE_TOLERANCE_MS;
-    const daemonAvailable = raw.daemon.state === 'running' && !stale;
-    const profiles = raw.profiles.slice(0, GC_MAX_PROFILES).map((item, index) => {
-        const fallback = `Профіль ${index + 1}`;
-        if (item === null || typeof item !== 'object' || Array.isArray(item) ||
-            typeof item.name !== 'string' || !item.name.trim() ||
-            typeof item.enabled !== 'boolean' || !GC_STATES.has(item.state) ||
-            typeof item.message !== 'string') {
-            return {name: fallback, enabled: true, state: 'failed', invalid: true,
-                lastStartedAt: null, lastFinishedAt: null, lastSuccessAt: null,
-                lastFailureAt: null, nextRunAt: null, message: 'Некоректний запис профілю.'};
-        }
-        const timestampFields = ['last_started_at', 'last_finished_at', 'last_success_at',
-            'last_failure_at', 'next_run_at'];
-        const invalidTimestamp = timestampFields.some(field =>
-            item[field] !== null && gcTimestamp(item[field]) === null);
-        return {
-            name: safeGcName(item.name, fallback), enabled: item.enabled, state: invalidTimestamp
-                ? 'failed' : item.state, invalid: invalidTimestamp,
-            lastStartedAt: gcTimestamp(item.last_started_at),
-            lastFinishedAt: gcTimestamp(item.last_finished_at),
-            lastSuccessAt: gcTimestamp(item.last_success_at),
-            lastFailureAt: gcTimestamp(item.last_failure_at),
-            nextRunAt: gcTimestamp(item.next_run_at),
-            message: invalidTimestamp ? 'Некоректний час у записі профілю.' : safeGcName(item.message, ''),
-        };
-    });
-    return {updatedAt: raw.updated_at, daemon: {...raw.daemon}, profiles, stale,
-        truncated: raw.profiles.length > GC_MAX_PROFILES, daemonAvailable, error: ''};
-}
-
-function gcProfilePresentation(profile, daemonAvailable = true) {
-    const successTime = profile.lastSuccessAt ||
-        (profile.state === 'ok' ? profile.lastFinishedAt : null);
-    if (!daemonAvailable) {
-        const failure = profile.lastFailureAt;
-        return {icon: 'dialog-warning-symbolic', style: 'failed', label: 'Недоступний',
-            timeLabel: failure ? 'Остання помилка' : successTime ? 'Останнє очищення' : '',
-            time: failure || successTime};
-    }
-    if (profile.invalid || profile.state === 'failed')
-        return {icon: 'dialog-warning-symbolic', style: 'failed', label: 'Помилка',
-            timeLabel: profile.lastFailureAt ? 'Остання помилка' : successTime ? 'Останнє очищення' : '',
-            time: profile.lastFailureAt || successTime};
-    if (profile.state === 'ok')
-        return {icon: 'object-select-symbolic', style: 'ok', label: 'OK',
-            timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
-    if (profile.state === 'disabled')
-        return {icon: 'media-playback-stop-symbolic', style: 'disabled', label: 'Вимкнено',
-            timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
-    if (profile.state === 'running')
-        return {icon: 'process-working-symbolic', style: 'running', label: 'Виконується',
-            timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
-    return {icon: 'content-loading-symbolic', style: 'pending', label: 'Очікує',
-        timeLabel: successTime ? 'Останнє очищення' : '', time: successTime};
-}
-
-function gcEventTime(value) {
-    const parsed = Date.parse(value);
-    if (!Number.isFinite(parsed))
-        return '--';
-    return new Date(parsed).toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
-}
-
-function hudBounds(workArea, scaleFactor) {
-    const scale = Math.max(1, scaleFactor);
-    return {
-        width: Math.max(1, Math.min(900, Math.floor(workArea.width / scale) - 48)),
-        height: Math.max(1, Math.floor(workArea.height / scale) - 48),
-    };
-}
-
-const LoginHud = GObject.registerClass(
-class LoginHud extends St.Widget {
-    _init() {
-        super._init({
-            style_class: 'login-hud-overlay',
-            layout_manager: new Clutter.FixedLayout(),
-            reactive: false,
-            x_expand: true,
-            y_expand: true,
-        });
-
-        this._status = null;
-        this._transportNotice = '';
-        this._onCloseRequested = null;
-        this._onOpenLogRequested = null;
-        this._onCancelRequested = null;
-        this._cancelPending = false;
-        this._primaryAction = null;
-        this._expandedJobs = new Set();
-        this._overallProgressFillId = 0;
-        this._shutdownCountdown = null;
-        this._handoffStarted = false;
-        this._selectedTab = 'startup';
-        this._alerts = null;
-        this._alertError = '';
-        this._gcProfiles = null;
-        this._gcError = '';
-        this._onAlertAckRequested = null;
-
-        this._viewport = new St.Widget({
-            layout_manager: new Clutter.BinLayout(),
-            x_align: Clutter.ActorAlign.START,
-            y_align: Clutter.ActorAlign.START,
-        });
-        this.add_child(this._viewport);
-        this._panel = new St.BoxLayout({
-            style_class: 'login-hud-panel',
-            vertical: true,
-            reactive: true,
-            x_align: Clutter.ActorAlign.CENTER,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        this._viewport.add_child(this._panel);
-
-        this._kicker = new St.Label({
-            style_class: 'login-hud-kicker',
-            text: 'SESSION / STARTUP TELEMETRY',
-        });
-        this._title = new St.Label({
-            style_class: 'login-hud-title',
-            text: 'Restoring workspace',
-        });
-        this._elapsed = new St.Label({
-            style_class: 'login-hud-elapsed',
-            text: 'Elapsed —',
-        });
-        this._overall = new St.Label({
-            style_class: 'login-hud-overall',
-            text: 'Waiting for session status…',
-        });
-        this._overallProgressLabel = new St.Label({
-            style_class: 'login-hud-overall-progress-label',
-            text: 'Overall progress 0%',
-        });
-        this._overallProgressTrack = new St.Widget({
-            style_class: 'login-hud-overall-progress-track',
-            x_expand: true,
-            height: 7,
-            layout_manager: new Clutter.BinLayout(),
-        });
-        this._overallProgressFill = new St.Widget({
-            style_class: 'login-hud-overall-progress-fill',
-            x_align: Clutter.ActorAlign.START,
-            y_expand: true,
-        });
-        this._overallProgressTrack.add_child(this._overallProgressFill);
-        this._overallProgressTrack.connect('notify::width', () => this._updateOverallProgressFill());
-        this._notice = new St.Label({
-            style_class: 'login-hud-notice',
-            visible: false,
-        });
-        this._rows = new St.BoxLayout({
-            style_class: 'login-hud-rows',
-            vertical: true,
-        });
-        this._tabs = new St.BoxLayout({style_class: 'login-hud-tabs', visible: false});
-        this._rowsScroll = new St.ScrollView({
-            style_class: 'login-hud-rows-scroll',
-            overlay_scrollbars: true,
-            hscrollbar_policy: St.PolicyType.NEVER,
-            vscrollbar_policy: St.PolicyType.AUTOMATIC,
-            enable_mouse_scrolling: true,
-            x_expand: true,
-        });
-        this._rowsScroll.add_child(this._rows);
-        this._actions = new St.BoxLayout({
-            style_class: 'login-hud-actions',
-            x_align: Clutter.ActorAlign.END,
-        });
-
-        this._panel.add_child(this._kicker);
-        this._panel.add_child(this._title);
-        this._panel.add_child(this._elapsed);
-        this._panel.add_child(this._overall);
-        this._panel.add_child(this._overallProgressLabel);
-        this._panel.add_child(this._overallProgressTrack);
-        this._panel.add_child(this._notice);
-        this._panel.add_child(this._tabs);
-        this._panel.add_child(this._rowsScroll);
-        this._panel.add_child(this._actions);
-    }
-
-    setCallbacks(onCloseRequested, onOpenLogRequested, onCancelRequested, onAlertAckRequested = null) {
-        this._onCloseRequested = onCloseRequested;
-        this._onOpenLogRequested = onOpenLogRequested;
-        this._onCancelRequested = onCancelRequested;
-        this._onAlertAckRequested = onAlertAckRequested;
-    }
-
-    setStatus(status) {
-        this._status = status;
-        this._transportNotice = '';
-        this._shutdownCountdown = null;
-        this._handoffStarted = false;
-        if (status.cancelled)
-            this._cancelPending = false;
-        const isShutdown = status.mode === 'shutdown';
-        this._kicker.text = isShutdown
-            ? 'SYSTEM / SHUTDOWN TELEMETRY'
-            : 'SESSION / STARTUP TELEMETRY';
-        this._title.text = isShutdown && status.cancelled
-            ? 'System shutdown cancelled'
-            : status.overallState === 'failed'
-            ? isShutdown ? 'System shutdown needs attention' : 'Session startup needs attention'
-            : status.overallState === 'degraded'
-                ? isShutdown
-                    ? 'System shutdown ready with safe fallbacks'
-                    : 'Session systems ready with safe fallbacks'
-            : TERMINAL_STATES.has(status.overallState)
-                ? isShutdown ? 'System shutdown complete' : 'Session systems ready'
-                : isShutdown ? 'Deinitializing system' : 'Restoring workspace';
-        this._overall.text = isShutdown
-            ? `System shutdown: ${status.overallMessage}`
-            : status.overallMessage;
-        this._overallProgress = overallFraction(status.stages);
-        this._overallProgressLabel.text = `Overall progress ${Math.round(this._overallProgress * 100)}%`;
-        this.scheduleProgressFill();
-        this._renderTabs();
-        this._renderContent();
-        this._renderActions(status);
-        this._refreshElapsed();
-        this._renderNotice();
-    }
-
-    setTransportNotice(message) {
-        this._transportNotice = message;
-        this._renderNotice();
-    }
-
-    setCancellationPending(pending) {
-        this._cancelPending = pending;
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
-    setShutdownCountdown(action, seconds) {
-        this._shutdownCountdown = {action, seconds};
-        const verb = action === 'restart'
-            ? 'Restarting'
-            : action === 'poweroff' ? 'Powering off' : 'Completing shutdown';
-        this._title.text = action === 'restart'
-            ? 'Ready to restart'
-            : action === 'poweroff' ? 'Ready to power off' : 'Ready for shutdown';
-        this._overall.text = `${verb} in ${seconds}…`;
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
-    setHandoffStarted(action) {
-        this._shutdownCountdown = null;
-        this._handoffStarted = true;
-        this._overall.text = action === 'restart'
-            ? 'Handing control to GNOME for restart…'
-            : action === 'poweroff'
-                ? 'Handing control to GNOME for power off…'
-                : 'Handing control back to GNOME…';
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
-    setAwaitingPrepared(action) {
-        this._shutdownCountdown = null;
-        this._title.text = action === 'restart' ? 'Ready to restart' : 'Ready to power off';
-        this._overall.text = 'Preparation complete · verifying final safety marker…';
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
-    resetExpansion() {
-        this._expandedJobs.clear();
-        this._selectedTab = 'startup';
-    }
-
-    setAlerts(alerts, error = '') {
-        this._alerts = alerts;
-        this._alertError = error;
-        if (this._status?.mode !== 'startup')
-            return;
-        this._renderTabs();
-        if (this._selectedTab === 'important')
-            this._renderContent();
-    }
-
-    setGcProfiles(profiles, error = '') {
-        const changed = gcViewKey(this._gcProfiles, this._gcError) !== gcViewKey(profiles, error);
-        this._gcProfiles = profiles;
-        this._gcError = error;
-        if (changed)
-            this.refreshVisibleGc();
-    }
-
-    refreshVisibleGc() {
-        if (this.visible && this._status?.mode === 'startup' && this._selectedTab === 'gc')
-            this._renderContent();
-    }
-
-    _renderTabs() {
-        this._tabs.destroy_all_children();
-        this._tabs.visible = this._status?.mode === 'startup';
-        if (!this._tabs.visible) {
-            this._selectedTab = 'startup';
-            return;
-        }
-        const count = this._alerts?.unread ?? 0;
-        for (const [tab, label] of [['startup', 'Відновлення'], ['important', `Важливе${count ? ` · ${count}` : ''}`], ['gc', 'GC-профілі']]) {
-            const button = new St.Button({
-                style_class: `login-hud-tab${this._selectedTab === tab ? ' login-hud-tab-selected' : ''}`,
-                label, reactive: true, can_focus: true, x_expand: true,
-            });
-            button.connect('clicked', () => {
-                this._selectedTab = tab;
-                this._renderTabs();
-                this._renderContent();
-            });
-            this._tabs.add_child(button);
-        }
-        this.scheduleProgressFill();
-    }
-
-    _renderContent() {
-        if (this._status?.mode === 'startup' && this._selectedTab === 'important')
-            this._renderAlerts();
-        else if (this._status?.mode === 'startup' && this._selectedTab === 'gc')
-            this._renderGcProfiles();
-        else if (this._status)
-            this._renderRows(this._status.stages);
-    }
-
-    _renderGcProfiles() {
-        this._rows.destroy_all_children();
-        this.scheduleProgressFill();
-        const addLabel = (parent, message, style = 'login-hud-row-message') => {
-            const label = new St.Label({style_class: style, text: message});
-            label.clutter_text.line_wrap = true;
-            label.clutter_text.ellipsize = 0;
-            parent.add_child(label);
-        };
-        if (!this._gcProfiles || this._gcError) {
-            addLabel(this._rows, this._gcError || 'Очікую звіт GC-профілів…', 'login-hud-alert-summary');
-            if (!this._gcProfiles)
-                return;
-        }
-        if (!this._gcProfiles.daemonAvailable)
-            addLabel(this._rows, this._gcProfiles.stale
-                ? 'Демон GC-профілів недоступний: звіт застарів.'
-                : 'Демон GC-профілів недоступний.', 'login-hud-alert-summary');
-        if (this._gcProfiles.truncated)
-            addLabel(this._rows, `Показано перші ${GC_MAX_PROFILES} профілів; решту приховано.`,
-                'login-hud-alert-summary');
-        if (!this._gcProfiles.profiles.length) {
-            addLabel(this._rows, 'Профілі GC не зареєстровані.', 'login-hud-alert-summary');
-            return;
-        }
-        for (const profile of this._gcProfiles.profiles) {
-            const presentation = gcProfilePresentation(profile, this._gcProfiles.daemonAvailable);
-            const row = new St.BoxLayout({vertical: true,
-                style_class: `login-hud-row login-hud-row-${presentation.style}`});
-            const heading = new St.BoxLayout({style_class: 'login-hud-row-heading'});
-            heading.add_child(new St.Icon({style_class: 'login-hud-row-icon',
-                icon_name: presentation.icon, icon_size: 16}));
-            heading.add_child(new St.Label({style_class: 'login-hud-row-name',
-                text: profile.name, x_expand: true}));
-            heading.add_child(new St.Label({style_class: 'login-hud-row-state',
-                text: presentation.label}));
-            row.add_child(heading);
-            if (presentation.timeLabel && presentation.time)
-                addLabel(row, `${presentation.timeLabel}: ${gcEventTime(presentation.time)}`);
-            if (profile.message)
-                addLabel(row, profile.message);
-            this._rows.add_child(row);
-        }
-    }
-
-    _renderAlerts() {
-        this._rows.destroy_all_children();
-        this.scheduleProgressFill();
-        const addLabel = (parent, message, style = 'login-hud-row-message') => {
-            const label = new St.Label({style_class: style, text: message});
-            label.clutter_text.line_wrap = true;
-            label.clutter_text.ellipsize = 0;
-            parent.add_child(label);
-        };
-        if (!this._alerts || this._alertError) {
-            addLabel(this._rows, this._alertError || 'Очікую перевірку власних систем…', 'login-hud-alert-summary');
-            if (!this._alerts)
-                return;
-        }
-        const alerts = this._alerts;
-        if (alerts.scanning || alerts.stale || alerts.scanError || alerts.incomplete)
-            addLabel(this._rows, 'Перевірка власних систем неповна; показано лише підтверджені важливі проблеми.', 'login-hud-alert-summary');
-        if (!alerts.incidents.length)
-            addLabel(this._rows, 'Підтверджених важливих проблем немає.', 'login-hud-alert-summary');
-        for (const incident of alerts.incidents) {
-            const source = alerts.sources.find(item => item.id === incident.source);
-            const row = new St.BoxLayout({vertical: true,
-                style_class: 'login-hud-row login-hud-row-failed'});
-            const key = `alert:${incident.source}:${incident.code}`;
-            const expanded = this._expandedJobs.has(key);
-            const button = new St.Button({
-                style_class: 'login-hud-row-heading-button', reactive: true, can_focus: true,
-                label: `${expanded ? '▾' : '▸'} ${source.label} · ${source.host} · ${incident.severity}`,
-            });
-            button.connect('clicked', () => {
-                if (expanded)
-                    this._expandedJobs.delete(key);
-                else
-                    this._expandedJobs.add(key);
-                this._renderContent();
-            });
-            row.add_child(button);
-            addLabel(row, incident.message);
-            if (expanded) {
-                addLabel(row, `Код: ${incident.code}\nВперше: ${incident.first_seen}\n` +
-                    `Востаннє: ${incident.last_seen}\nПовторень: ${incident.occurrences}\n` +
-                    `Стан: активна; рівень: ${incident.severity}\n` +
-                    `Власний код: ${source.source_ref}\n${incident.detail}`, 'login-hud-alert-details');
-            }
-            if (!incident.acknowledged) {
-                const ack = new St.Button({style_class: 'login-hud-tab', label: 'Переглянуто',
-                    reactive: true, can_focus: true, x_align: Clutter.ActorAlign.END});
-                ack.connect('clicked', () => this._onAlertAckRequested?.(incident.source, incident.code));
-                row.add_child(ack);
-            }
-            this._rows.add_child(row);
-        }
-    }
-
-    getInteractiveActor() {
-        return this._panel;
-    }
-
-    setWorkArea(workArea, scaleFactor) {
-        this._workArea = workArea;
-        this._scaleFactor = scaleFactor;
-        this._viewport.set_position(workArea.x, workArea.y);
-        this._viewport.set_size(workArea.width, workArea.height);
-        this.scheduleProgressFill();
-    }
-
-    _updatePanelLayout() {
-        if (!this._workArea || !this._panel.get_stage())
-            return;
-        const bounds = hudBounds(this._workArea, this._scaleFactor);
-        const panelStyle = `width: ${bounds.width}px; max-width: ${bounds.width}px; ` +
-            `max-height: ${bounds.height}px;`;
-        if (this._panel.get_style() !== panelStyle)
-            this._panel.set_style(panelStyle);
-
-        // Reserve the real header, notice and action heights, not a fixed row
-        // cap. Expanded logs may scroll; the Close/Cancel controls stay outside.
-        const theme = this._panel.get_theme_node();
-        const innerWidth = theme.adjust_for_width(bounds.width * this._scaleFactor);
-        const children = this._panel.get_children().filter(child => child.visible);
-        let chromeHeight = theme.adjust_preferred_height(0, 0)[1] +
-            theme.get_length('spacing') * Math.max(0, children.length - 1);
-        for (const child of children) {
-            if (child !== this._rowsScroll)
-                chromeHeight += child.get_preferred_height(innerWidth)[1];
-        }
-        // Include the list's top margin in the available-height calculation.
-        const rowsHeight = Math.max(1, Math.floor(bounds.height -
-            chromeHeight / this._scaleFactor - 8));
-        const rowsStyle = `max-height: ${rowsHeight}px;`;
-        if (this._rowsScroll.get_style() !== rowsStyle)
-            this._rowsScroll.set_style(rowsStyle);
-    }
-
-    focusPrimaryAction() {
-        this._primaryAction?.grab_key_focus();
-    }
-
-    reportLogLaunchFailure(message) {
-        this._transportNotice = `Could not open error log: ${message}`;
-        this._renderNotice();
-    }
-
-    refreshClock() {
-        this._refreshElapsed();
-        // A stopped collector emits no new file events. Age the displayed
-        // report anyway instead of leaving an old green result fresh forever.
-        if (this._alerts && !this._alerts.stale &&
-            Date.now() - Date.parse(this._alerts.updatedAt) > 15 * 60 * 1000) {
-            this._alerts.stale = true;
-            if (this._status?.mode === 'startup' && this._selectedTab === 'important')
-                this._renderContent();
-        }
-    }
-
-    scheduleProgressFill() {
-        if (this._overallProgressFillId)
-            return;
-        this._overallProgressFillId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            this._overallProgressFillId = 0;
-            this._updatePanelLayout();
-            this._updateOverallProgressFill();
-            return GLib.SOURCE_REMOVE;
-        });
-    }
-
-    cancelDeferredUpdates() {
-        if (this._overallProgressFillId)
-            GLib.Source.remove(this._overallProgressFillId);
-        this._overallProgressFillId = 0;
-    }
-
-    _refreshElapsed() {
-        this._elapsed.text = this._status ? elapsedSince(this._status.startedAt) : 'Elapsed —';
-    }
-
-    _updateOverallProgressFill() {
-        if (!this._overallProgressTrack.get_stage() || !this._overallProgressTrack.mapped)
-            return;
-        const width = this._overallProgressTrack.width;
-        this._overallProgressFill.set_width(Math.round(width * (this._overallProgress ?? 0)));
-    }
-
-    _renderNotice() {
-        this._notice.text = this._transportNotice;
-        this._notice.visible = Boolean(this._transportNotice);
-        this.scheduleProgressFill();
-    }
-
-    _renderRows(stages) {
-        this.scheduleProgressFill();
-        this._rows.destroy_all_children();
-        if (stages.length === 0) {
-            this._rows.add_child(new St.Label({
-                style_class: 'login-hud-empty',
-                text: this._status?.mode === 'shutdown'
-                    ? 'No shutdown stages have been published yet.'
-                    : 'No startup stages have been published yet.',
-            }));
-            return;
-        }
-
-        for (const stage of stages)
-            this._rows.add_child(this._makeStageRow(stage));
-    }
-
-    _makeStageRow(stage) {
-        const row = new St.BoxLayout({
-            style_class: `login-hud-row login-hud-row-${stage.state}`,
-            vertical: true,
-        });
-        const expanded = this._expandedJobs.has(stage.id);
-        const headingContent = new St.BoxLayout({style_class: 'login-hud-row-heading'});
-        const expander = new St.Icon({
-            style_class: 'login-hud-row-expander',
-            icon_name: expanded ? 'pan-down-symbolic' : 'pan-end-symbolic',
-            icon_size: 12,
-        });
-        const icon = new St.Icon({
-            style_class: 'login-hud-row-icon',
-            icon_name: stateIcon(stage.state),
-            icon_size: 16,
-        });
-        const name = new St.Label({
-            style_class: 'login-hud-row-name',
-            text: stage.name,
-            x_expand: true,
-        });
-        const status = new St.Label({
-            style_class: 'login-hud-row-state',
-            text: displayState(stage.state),
-        });
-        headingContent.add_child(expander);
-        headingContent.add_child(icon);
-        headingContent.add_child(name);
-        headingContent.add_child(status);
-        const heading = new St.Button({
-            style_class: 'login-hud-row-heading-button',
-            child: headingContent,
-            reactive: true,
-            can_focus: true,
-            x_expand: true,
-            accessible_name: `${expanded ? 'Collapse' : 'Expand'} ${stage.name}`,
-        });
-        heading.connect('clicked', () => {
-            if (this._expandedJobs.has(stage.id))
-                this._expandedJobs.delete(stage.id);
-            else
-                this._expandedJobs.add(stage.id);
-            if (this._status)
-                this._renderContent();
-        });
-        row.add_child(heading);
-
-        if (stage.message) {
-            row.add_child(new St.Label({
-                style_class: 'login-hud-row-message',
-                text: stage.message,
-            }));
-        }
-
-        if (stage.fraction !== null) {
-            const track = new St.Widget({
-                style_class: 'login-hud-progress-track',
-                x_expand: true,
-                height: 5,
-                layout_manager: new Clutter.BinLayout(),
-            });
-            const fill = new St.Widget({
-                style_class: 'login-hud-progress-fill',
-                x_align: Clutter.ActorAlign.START,
-                y_expand: true,
-            });
-            const updateFill = () => {
-                if (!track.get_stage() || !track.mapped)
-                    return;
-                fill.set_width(Math.round(track.width * stage.fraction));
-            };
-            track.add_child(fill);
-            track.connect('notify::width', updateFill);
-            track.connect('notify::mapped', updateFill);
-            row.add_child(track);
-        } else if (!TERMINAL_STATES.has(stage.state)) {
-            const indeterminate = new St.BoxLayout({style_class: 'login-hud-indeterminate'});
-            const spinner = new Spinner(14, {animate: true});
-            spinner.add_style_class_name('login-hud-spinner');
-            spinner.play();
-            indeterminate.add_child(spinner);
-            indeterminate.add_child(new St.Label({
-                style_class: 'login-hud-indeterminate-label',
-                text: 'In progress',
-            }));
-            row.add_child(indeterminate);
-        }
-
-        if (expanded)
-            row.add_child(this._makeJobDetails(stage));
-
-        return row;
-    }
-
-    _makeJobDetails(stage) {
-        const details = new St.BoxLayout({
-            style_class: 'login-hud-job-details',
-            vertical: true,
-        });
-        if (stage.children.length > 0) {
-            details.add_child(new St.Label({
-                style_class: 'login-hud-detail-heading',
-                text: 'INTERNAL STEPS',
-            }));
-            for (const child of stage.children) {
-                const substep = new St.BoxLayout({style_class: 'login-hud-substep'});
-                substep.add_child(new St.Icon({
-                    style_class: 'login-hud-substep-icon',
-                    icon_name: stateIcon(child.state),
-                    icon_size: 13,
-                }));
-                substep.add_child(new St.Label({
-                    style_class: 'login-hud-substep-name',
-                    text: child.name,
-                    x_expand: true,
-                }));
-                substep.add_child(new St.Label({
-                    style_class: 'login-hud-substep-state',
-                    text: displayState(child.state),
-                }));
-                details.add_child(substep);
-                details.add_child(new St.Label({
-                    style_class: 'login-hud-substep-message',
-                    text: child.message,
-                }));
-            }
-        }
-
-        details.add_child(new St.Label({
-            style_class: 'login-hud-detail-heading',
-            text: 'ACTIVITY LOG',
-        }));
-        if (stage.events.length === 0) {
-            details.add_child(new St.Label({
-                style_class: 'login-hud-log-empty',
-                text: 'No activity has been reported yet.',
-            }));
-            return details;
-        }
-        for (const event of stage.events) {
-            const source = event.source ? `${event.source} · ` : '';
-            details.add_child(new St.Label({
-                style_class: `login-hud-log-line login-hud-log-${event.state}`,
-                text: `${eventTime(event.at)}  ${source}${displayState(event.state)} — ${event.message}`,
-            }));
-        }
-        return details;
-    }
-
-    _renderActions(status) {
-        this.scheduleProgressFill();
-        this._actions.destroy_all_children();
-        this._primaryAction = null;
-        const hasFailure = status.overallState === 'failed' || status.stages.some(stage => stage.state === 'failed');
-        const allTerminal = status.stages.length > 0 && status.stages.every(stage => TERMINAL_STATES.has(stage.state));
-
-        if (hasFailure) {
-            const button = new St.Button({
-                style_class: 'login-hud-button',
-                label: 'Show full error log',
-                can_focus: true,
-                reactive: true,
-            });
-            button.connect('clicked', () => this._onOpenLogRequested?.(status.errorLogPath));
-            this._actions.add_child(button);
-            this._primaryAction = button;
-            if (status.mode === 'shutdown') {
-                this._actions.add_child(new St.Label({
-                    style_class: 'login-hud-action-status',
-                    text: 'Shutdown stopped · review the error and retry power off',
-                }));
-            }
-            this._addCloseButton(status.mode === 'shutdown' && shutdownRecoveryPending(status)
-                ? 'Hide (recovery continues)' : 'Close');
-        } else if (status.mode === 'shutdown' && this._handoffStarted) {
-            this._actions.add_child(new St.Label({
-                style_class: 'login-hud-action-status',
-                text: 'Shutdown handoff in progress',
-            }));
-        } else if (status.mode === 'shutdown' && !status.cancelled) {
-            const button = new St.Button({
-                style_class: 'login-hud-button login-hud-button-cancel',
-                label: this._cancelPending
-                    ? 'Cancelling safely…'
-                    : this._shutdownCountdown
-                        ? `Cancel (${this._shutdownCountdown.seconds}s)`
-                        : 'Cancel shutdown',
-                can_focus: true,
-                reactive: !this._cancelPending,
-            });
-            button.connect('clicked', () => this._onCancelRequested?.(status));
-            this._actions.add_child(button);
-            this._primaryAction = button;
-        } else if (status.mode === 'shutdown' && status.cancelled) {
-            this._addCloseButton(shutdownRecoveryPending(status) ? 'Hide (recovery continues)' : 'Close');
-        } else if (allTerminal && status.mode !== 'shutdown') {
-            this._addCloseButton('OK', true);
-        }
-    }
-
-    _addCloseButton(label, primary = false) {
-        const button = new St.Button({
-            style_class: `login-hud-button${primary ? ' login-hud-button-primary' : ''}`,
-            label,
-            can_focus: true,
-            reactive: true,
-        });
-        button.connect('clicked', () => this._onCloseRequested?.());
-        this._actions.add_child(button);
-        if (!this._primaryAction)
-            this._primaryAction = button;
-    }
-});
+import {LoginHud} from './hudView.js';
+import {
+    STATUS_DIRECTORY, STATUS_FILENAME, ALERTS_FILENAME, GC_STATUS_FILENAME,
+    DISMISSED_FILENAME, CANCEL_FILENAME, REQUEST_FILENAME, RENDERED_FILENAME,
+    COMMIT_FILENAME, PREPARED_FILENAME, SESSION_MANAGER_NAME,
+    SHUTDOWN_COORDINATOR_UNIT, DBUS_NAME, DBUS_PATH, DBUS_INTERFACE, SYSTEMD_NAME,
+    SYSTEMD_PATH, SYSTEMD_MANAGER_INTERFACE, SYSTEMD_UNIT_INTERFACE,
+    PROPERTIES_INTERFACE, TERMINAL_STATES, SHUTDOWN_ACTIONS,
+    SHUTDOWN_COUNTDOWN_SECONDS, PREFLIGHT_STATUS_TIMEOUT_MS, GC_MAX_STATUS_BYTES,
+    PREPARED_POLL_TIMEOUT_MS, STALE_STARTUP_PRESENTATION_MS,
+    normaliseStatus, normalizeAlerts, normalizeGcProfiles,
+    shutdownRecoveryPending, sameOperationContext,
+} from './reports.js';
 
 export default class LoginHudExtension extends Extension {
     enable() {
@@ -2031,6 +910,9 @@ export default class LoginHudExtension extends Extension {
             request.session_id !== this._currentSessionId ||
             !SHUTDOWN_ACTIONS.has(request.action) || !recent)
             return;
+        if (this._isLocallyCancelled({operationId: request.operation_id,
+            sessionId: request.session_id}))
+            return;
         const cancellation = this._readProtocolFileSync(this._cancelFile);
         if (cancellation?.schema_version === 1 &&
             cancellation.operation_id === request.operation_id &&
@@ -2047,6 +929,29 @@ export default class LoginHudExtension extends Extension {
     _isLocallyCancelled(status) {
         return Boolean(status?.operationId) && (status.operationId === this._locallyCancelledOperationId ||
             this._cancelledOperations?.has(`${status.sessionId}:${status.operationId}`) === true);
+    }
+
+    _shutdownOperationBinding(status, request = this._readProtocolFileSync(this._requestFile)) {
+        const validRequest = request?.schema_version === 1 &&
+            /^[0-9a-f]{32}$/.test(request.operation_id) &&
+            request.session_id === this._currentSessionId && SHUTDOWN_ACTIONS.has(request.action);
+        const shutdown = status?.mode === 'shutdown' && status.sessionId === this._currentSessionId;
+        const matchesRequest = shutdown && validRequest &&
+            request.operation_id === status.operationId && request.action === status.shutdownAction;
+        const matchesLocalPreflight = shutdown && Boolean(this._preflightOperationId) &&
+            status.operationId === this._preflightOperationId &&
+            status.shutdownAction === this._preflightAction;
+        // A live confirmation owns the transaction even if its request file
+        // still contains an older operation. Withdrawn requests are passive.
+        const localOperationId = this._preflightOperationId || this._nativeHandoffOperationId;
+        const currentOperationId = localOperationId || (validRequest &&
+            !this._isLocallyCancelled({operationId: request.operation_id, sessionId: request.session_id})
+            ? request.operation_id : null);
+        const matchesCurrent = !this._preflightStarting && shutdown && Boolean(currentOperationId) &&
+            status.operationId === currentOperationId && (localOperationId
+                ? status.shutdownAction === (this._preflightAction || this._lastGoodStatus?.shutdownAction)
+                : matchesRequest);
+        return {matchesRequest, matchesLocalPreflight, currentOperationId, matchesCurrent};
     }
 
     _isCurrentOperation(status) {
@@ -2447,7 +1352,9 @@ export default class LoginHudExtension extends Extension {
     }
 
     _handleTerminalShutdownStatus(status) {
-        if (status.mode !== 'shutdown')
+        if (!this._shutdownOperationBinding(status).matchesCurrent ||
+            ((status.operationContext || this._lastGoodStatus?.operationContext) &&
+                !this._isCurrentOperation(status)))
             return;
         const hasFailure = status.overallState === 'failed' ||
             status.stages.some(stage => stage.state === 'failed');
@@ -2455,14 +1362,12 @@ export default class LoginHudExtension extends Extension {
             return;
 
         const wasHandedOff = this._nativeHandoffOperationId === status.operationId;
-        this._stopPreparedPolling();
-        this._cancelShutdownCountdown();
+        this._withdrawShutdownAuthority(status);
         this._renderAckScheduledOperationId = null;
         if (this._renderAckWrittenOperationId === status.operationId)
             this._renderAckWrittenOperationId = null;
         if (this._commitWrittenOperationId === status.operationId)
             this._commitWrittenOperationId = null;
-        this._locallyCancelledOperationId = status.operationId;
         if (hasFailure) {
             try {
                 this._writeProtocolFile(this._cancelFile, 'shutdown-cancel', {
@@ -2512,6 +1417,7 @@ export default class LoginHudExtension extends Extension {
         const operationId = this._preflightOperationId;
         if (!operationId || this._nativeHandoffOperationId === operationId)
             return;
+        this._withdrawShutdownAuthority({operationId, sessionId: this._currentSessionId});
         try {
             this._writeProtocolFile(this._cancelFile, 'shutdown-cancel', {
                 schema_version: 1,
@@ -2524,7 +1430,6 @@ export default class LoginHudExtension extends Extension {
         } catch (error) {
             console.warn(`Login HUD could not cancel backend work while disabling: ${error.message}`);
         }
-        this._locallyCancelledOperationId = operationId;
         this._cancelNativeEndSessionOnce(operationId);
     }
 
@@ -2541,21 +1446,17 @@ export default class LoginHudExtension extends Extension {
             try {
                 const [, bytes] = file.load_contents_finish(result);
                 const parsed = normaliseStatus(JSON.parse(new TextDecoder().decode(bytes)));
+                const request = parsed.mode === 'shutdown'
+                    ? this._readProtocolFileSync(this._requestFile) : null;
+                const {matchesRequest, matchesLocalPreflight, currentOperationId, matchesCurrent} =
+                    this._shutdownOperationBinding(parsed, request);
+                if ((this._preflightStarting || currentOperationId) && !matchesCurrent)
+                    return;
                 if (parsed.sessionId !== this._currentSessionId) {
                     this._lastGoodStatus = null;
                     this._syncVisibility();
                     return;
                 }
-                const request = parsed.mode === 'shutdown'
-                    ? this._readProtocolFileSync(this._requestFile) : null;
-                const matchesRequest = request?.schema_version === 1 &&
-                    request.operation_id === parsed.operationId &&
-                    request.session_id === parsed.sessionId &&
-                    SHUTDOWN_ACTIONS.has(request.action) &&
-                    request.action === parsed.shutdownAction;
-                const matchesLocalPreflight = parsed.mode === 'shutdown' &&
-                    parsed.operationId === this._preflightOperationId &&
-                    parsed.shutdownAction === this._preflightAction;
                 const terminalShutdown = parsed.mode === 'shutdown' &&
                     (parsed.cancelled || parsed.overallState === 'failed' ||
                         parsed.stages.some(stage => stage.state === 'failed'));
@@ -2577,11 +1478,6 @@ export default class LoginHudExtension extends Extension {
                 if (!parsed.shutdownActionExplicit &&
                     (matchesRequest || matchesLocalPreflight))
                     parsed.shutdownAction = matchesRequest ? request.action : this._preflightAction;
-                if (parsed.operationId === this._preflightOperationId &&
-                    this._preflightWatchdogId) {
-                    GLib.Source.remove(this._preflightWatchdogId);
-                    this._preflightWatchdogId = 0;
-                }
                 const previousContext = this._lastGoodStatus?.operationContext;
                 if (previousContext && parsed.mode === 'shutdown' &&
                     parsed.operationId === this._lastGoodStatus.operationId &&
@@ -2589,6 +1485,11 @@ export default class LoginHudExtension extends Extension {
                     (parsed.operationContext.attempt === previousContext.attempt &&
                         !sameOperationContext(parsed.operationContext, previousContext))))
                     return;
+                if (parsed.operationId === this._preflightOperationId &&
+                    this._preflightWatchdogId) {
+                    GLib.Source.remove(this._preflightWatchdogId);
+                    this._preflightWatchdogId = 0;
+                }
                 const isNewSessionOrMode = parsed.sessionId !== this._activeSessionId ||
                     parsed.mode !== this._activeMode ||
                     parsed.operationId !== this._activeOperationId ||
@@ -2619,8 +1520,8 @@ export default class LoginHudExtension extends Extension {
                 if (parsed.cancelled) {
                     this._cancelRequestPending = false;
                 }
-                if (parsed.shutdownOrigin === 'preflight' &&
-                    parsed.operationId !== this._locallyCancelledOperationId &&
+                if (matchesCurrent && parsed.shutdownOrigin === 'preflight' &&
+                    !this._isLocallyCancelled(parsed) &&
                     (!this._preflightOperationId ||
                         this._preflightOperationId === parsed.operationId)) {
                     this._preflightOperationId = parsed.operationId;

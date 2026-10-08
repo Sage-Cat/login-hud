@@ -5,7 +5,7 @@ VERSION := $(shell jq -r .version metadata.json)
 DIST_DIR ?= dist
 ARCHIVE := $(DIST_DIR)/$(UUID).shell-extension.zip
 CHECKSUM := $(ARCHIVE).sha256
-FILES := metadata.json extension.js buildInfo.js stylesheet.css
+FILES := metadata.json extension.js reports.js hudView.js buildInfo.js stylesheet.css
 ESLINT := $(if $(wildcard node_modules/.bin/eslint),node_modules/.bin/eslint,eslint)
 
 .PHONY: all check test install uninstall package release-artifacts verify-package clean
@@ -19,8 +19,8 @@ check:
 	@command -v shellcheck >/dev/null || { echo "check: shellcheck is required" >&2; exit 1; }
 	@jq -e '.uuid == "$(UUID)" and .["shell-version"] == ["46"] and (.version | type == "number")' metadata.json >/dev/null
 	@grep -Fq "uuid='$(UUID)'" scripts/install.sh scripts/uninstall.sh scripts/verify-package.sh
-	@node --input-type=module --check < extension.js
-	@$(ESLINT) extension.js
+	@for source in extension.js reports.js hudView.js; do node --input-type=module --check < "$$source"; done
+	@$(ESLINT) extension.js reports.js hudView.js
 	@shellcheck scripts/*.sh tests/check.sh
 	@node tests/lifecycle-static.mjs
 	@node --test tests/layout.mjs tests/alerts.mjs tests/gc-profiles.mjs tests/shutdown-visibility.mjs tests/enable-lifecycle.mjs
@@ -37,7 +37,7 @@ uninstall:
 package: check
 	@command -v gnome-extensions >/dev/null || { echo "package: gnome-extensions is required" >&2; exit 1; }
 	@mkdir -p "$(DIST_DIR)"
-	@gnome-extensions pack --force --extra-source=buildInfo.js --out-dir "$(DIST_DIR)" .
+	@gnome-extensions pack --force --extra-source=buildInfo.js --extra-source=reports.js --extra-source=hudView.js --out-dir "$(DIST_DIR)" .
 	@./scripts/verify-package.sh "$(ARCHIVE)"
 	@echo "package: wrote $(ARCHIVE) (version $(VERSION))"
 

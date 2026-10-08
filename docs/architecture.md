@@ -61,12 +61,19 @@ release that inhibitor.
 
 | File | Responsibility |
 | --- | --- |
-| `extension.js` | Schema normalization, grouped jobs, tab rendering, file watches, lifecycle, shutdown interception, authorization, and read-only diagnostics. |
+| `extension.js` | GNOME lifecycle, file watches, operation ownership, shutdown interception, authorization, and read-only diagnostics. |
+| `reports.js` | Pure status, alert, cleanup, normalization, aggregation, and presentation helpers. |
+| `hudView.js` | `LoginHud` St.Widget presentation class and rendering callbacks. |
 | `stylesheet.css` | Panel, rows, progress indicators, states, actions, and tabs. |
 | `metadata.json` | UUID, supported Shell version, and extension version. |
 | `buildInfo.js` | Import-time build identity stamped into release artifacts. |
 | `tests/*.mjs` | Pure logic, layout, lifecycle, and operation-bound shutdown regressions. |
 | `scripts/capture-docs.py`, `scripts/screenshot-fixture.js` | Opt-in disposable compositor and synthetic screenshot scenarios; excluded from the extension bundle. |
+
+Shutdown status and native dialog actions share one operation binding. A stale
+failure cannot replace a newer preflight or cancel its dialog; unbound historical
+failures stay passive. Local withdrawal survives disable/re-enable even if the
+cancellation file cannot be written.
 
 The [file protocol](protocol.md) defines integration fields. Screenshots validate
 actual rendering, while the unit tests exercise authorization and failure paths;

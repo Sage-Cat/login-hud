@@ -1,9 +1,10 @@
-import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import {loadSource} from './load-source.mjs';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
-const source = await readFile(new URL('../extension.js', import.meta.url), 'utf8');
+const source = await loadSource();
 function fixture() {
     let clock = 0;
     const timers = [];
@@ -13,14 +14,18 @@ function fixture() {
     const sessionMode = {isLocked: false, isGreeter: false};
     const main = {sessionMode, notify(...args) { notices.push(args); },
         popModal() { modalPops++; }, pushModal() { throw new Error('unexpected modal acquisition'); }};
-    const {LoginHudExtension} = runInNewContext(
-        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
-            '\n;({LoginHudExtension});', {
+    const {LoginHudExtension, normaliseStatus} = runInNewContext(
+        source +
+            '\n;({LoginHudExtension, normaliseStatus});', {
+            BUILD_REVISION: 'development',
             GObject: {registerClass: cls => cls}, St: {Widget: class {}}, Extension: class {},
+            Gio: {Cancellable: class {cancel() {}}, DBus: {session: {}},
+                DBusExportedObject: {wrapJSObject: () => ({export() {}, unexport() {}})}},
             Main: main, console: {info() {}, warn() {}, error() {}}, TextDecoder,
             global: {stage: {queue_redraw() {}}},
             Clutter: {KEY_Escape: 'Escape', EVENT_PROPAGATE: 'propagate', EVENT_STOP: 'stop', RepaintFlags: {POST_PAINT: 1}, threads_add_repaint_func_full(_flags, fn) { paints.push(fn); }},
             GLib: {PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false, SOURCE_CONTINUE: true,
+                file_get_contents: () => [true, new TextEncoder().encode('boot\n')],
                 get_monotonic_time: () => clock * 1e6,
                 timeout_add(_priority, _interval, fn) { timers.push(fn); return timers.length; },
                 Source: {remove() {}}},
@@ -42,13 +47,33 @@ function fixture() {
         _hud: {visible: true, mapped: true, getInteractiveActor: () => panel,
             setTransportNotice() {}, setShutdownCountdown() {}, focusPrimaryAction() {},
             setAwaitingPrepared() {}, setHandoffStarted() {}, resetExpansion() {},
-            setCancellationPending() {}, setStatus() {}},
+            setCancellationPending() {}, setStatus() {}, scheduleProgressFill() {},
+            refreshVisibleGc() {}, cancelDeferredUpdates() {}, destroy() {}},
         _requestCancel() { cancels++; return true; },
         _writeProtocolFile() { commits++; }, _startPreparedPolling() {}, _checkPreparedHandoff() {},
         _stopPreparedPolling() {}, _originalEndSessionConfirm() { handoffs++; },
     });
-    return {extension, status, panel, sessionMode, timers, paints, main, notices,
+    return {extension, status, normaliseStatus, panel, sessionMode, timers, paints, main, notices,
         modalPops: () => modalPops, clock(value) { clock = value; }, cancels: () => cancels, commits: () => commits, handoffs: () => handoffs};
+}
+
+function shutdownReport(status, fields = {}) {
+    return {schema_version: 1, mode: 'shutdown', session_id: status.sessionId,
+        operation_id: status.operationId, operation_context: status.operationContext,
+        shutdown_origin: 'preflight', shutdown_action: status.shutdownAction,
+        started_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:01Z',
+        overall_state: 'ready', overall_message: 'Shutdown progress', error_log_path: null,
+        stages: [{id: 'proof', state: 'ready', message: 'Verified'}], ...fields};
+}
+
+function bindReport(f, raw, request = null) {
+    const requestFile = {};
+    const statusFile = {load_contents_async(_cancel, callback) { callback(this, {}); },
+        load_contents_finish() { return [true, new TextEncoder().encode(JSON.stringify(raw))]; }};
+    Object.assign(f.extension, {_loadSerial: 0, _requestFile: requestFile, _cancelFile: {},
+        _statusFile: statusFile, _installHudChrome() {},
+        _readProtocolFileSync: file => file === requestFile ? request : null});
+    return {requestFile, statusFile};
 }
 
 test('lock-screen confirmation cancels native shutdown without starting hidden work', async () => {
@@ -172,12 +197,157 @@ test('shutdown status cannot replace the action from a confirmed request or loca
         });
         f.extension._loadStatus();
         if (action === 'restart')
-            assert.equal(f.extension._lastGoodStatus, null, binding);
+            assert.equal(f.extension._lastGoodStatus, f.status, binding);
         else
             assert.equal(f.extension._lastGoodStatus.shutdownAction, 'poweroff', binding);
         assert.equal(f.extension._preflightSignal, 'ConfirmedShutdown', binding);
         assert.equal(f.handoffs(), 0, binding);
     }
+});
+
+test('stale terminal reports cannot replace or cancel a newer confirmed shutdown', () => {
+    for (const binding of ['local', 'request', 'stale-request', 'handoff']) {
+        for (const terminal of [{cancelled: true}, {overall_state: 'failed'},
+            {stages: [{id: 'proof', state: 'failed', message: 'Stopped'}]}]) {
+            const f = fixture();
+            const old = {...f.status};
+            f.status.operationId = 'b'.repeat(32);
+            f.status.operationContext = {...f.status.operationContext, operation_id: f.status.operationId};
+            const requestId = binding === 'stale-request' || binding === 'handoff'
+                ? old.operationId : f.status.operationId;
+            const raw = shutdownReport(old, terminal);
+            bindReport(f, raw, {schema_version: 1, session_id: 'session',
+                operation_id: requestId, action: 'poweroff'});
+            let nativeCancels = 0;
+            f.main.endSessionDialog = {cancel() { nativeCancels++; }};
+            delete f.extension._stopPreparedPolling;
+            Object.assign(f.extension, {
+                _activeSessionId: 'session', _activeMode: 'shutdown', _activeStartedAt: raw.started_at,
+                _activeOperationId: f.status.operationId,
+                _preflightOperationId: binding === 'request' || binding === 'handoff' ? null : f.status.operationId,
+                _preflightAction: 'poweroff', _preflightSignal: 'ConfirmedShutdown',
+                _nativeHandoffOperationId: binding === 'handoff' ? f.status.operationId : null,
+                _shutdownCountdownId: 19, _shutdownCountdownOperationId: f.status.operationId,
+                _shutdownCountdownSeconds: 3, _preparedPollId: 20, _preflightWatchdogId: 21,
+                _renderAckScheduledOperationId: f.status.operationId,
+                _renderAckWrittenOperationId: f.status.operationId, _commitWrittenOperationId: f.status.operationId,
+                _modalGrab: {},
+            });
+            f.extension._loadStatus();
+            // Direct terminal handling must enforce the same binding as the loader.
+            f.extension._handleTerminalShutdownStatus(f.normaliseStatus(raw));
+            assert.equal(f.extension._lastGoodStatus, f.status, binding);
+            assert.equal(f.extension._activeOperationId, f.status.operationId, binding);
+            assert.equal(f.extension._shutdownCountdownId, 19, binding);
+            assert.equal(f.extension._shutdownCountdownOperationId, f.status.operationId, binding);
+            assert.equal(f.extension._shutdownCountdownSeconds, 3, binding);
+            assert.equal(f.extension._preparedPollId, 20, binding);
+            assert.equal(f.extension._preflightWatchdogId, 21, binding);
+            assert.equal(f.extension._renderAckScheduledOperationId, f.status.operationId, binding);
+            assert.equal(f.extension._renderAckWrittenOperationId, f.status.operationId, binding);
+            assert.equal(f.extension._commitWrittenOperationId, f.status.operationId, binding);
+            assert.equal(f.extension._nativeHandoffOperationId,
+                binding === 'handoff' ? f.status.operationId : null, binding);
+            assert.equal(f.extension._hasShutdownAuthority(f.status), true, binding);
+            assert.equal(f.modalPops(), 0, binding);
+            assert.equal(nativeCancels, 0, binding);
+            assert.equal(f.commits(), 0, binding);
+        }
+    }
+});
+
+test('matching terminal reports withdraw authority and finish native cancellation once', () => {
+    for (const handedOff of [false, true]) {
+        for (const terminal of [{cancelled: true}, {overall_state: 'failed'}]) {
+            const f = fixture();
+            const raw = shutdownReport(f.status, terminal);
+            bindReport(f, raw, {schema_version: 1, session_id: 'session',
+                operation_id: f.status.operationId, action: 'poweroff'});
+            let nativeCancels = 0;
+            f.main.endSessionDialog = {cancel() { nativeCancels++; }};
+            delete f.extension._stopPreparedPolling;
+            Object.assign(f.extension, {
+                _activeSessionId: 'session', _activeMode: 'shutdown', _activeStartedAt: raw.started_at,
+                _preflightOperationId: f.status.operationId, _preflightAction: 'poweroff',
+                _preflightSignal: 'ConfirmedShutdown', _modalGrab: {},
+                _nativeHandoffOperationId: handedOff ? f.status.operationId : null,
+                _shutdownCountdownId: 19, _shutdownCountdownOperationId: f.status.operationId,
+                _preparedPollId: 20, _renderAckWrittenOperationId: f.status.operationId,
+                _commitWrittenOperationId: f.status.operationId,
+            });
+            f.extension._loadStatus();
+            f.extension._loadStatus();
+            assert.equal(f.extension._isLocallyCancelled(f.extension._lastGoodStatus), true);
+            assert.equal(f.extension._hasShutdownAuthority(f.extension._lastGoodStatus), false);
+            assert.equal(f.extension._preflightOperationId, null);
+            assert.equal(f.extension._nativeHandoffOperationId, null);
+            assert.equal(f.extension._shutdownCountdownId, 0);
+            assert.equal(f.extension._preparedPollId, 0);
+            assert.equal(f.extension._renderAckWrittenOperationId, null);
+            assert.equal(f.extension._commitWrittenOperationId, null);
+            assert.equal(f.modalPops(), 1);
+            assert.equal(nativeCancels, handedOff ? 0 : 1);
+            assert.equal(f.commits(), terminal.overall_state === 'failed' ? 1 : 0);
+        }
+    }
+});
+
+test('an unbound historical terminal report remains passive', () => {
+    const f = fixture();
+    bindReport(f, shutdownReport(f.status, {overall_state: 'failed'}));
+    let nativeCancels = 0;
+    f.main.endSessionDialog = {cancel() { nativeCancels++; }};
+    f.extension._loadStatus();
+    assert.equal(f.extension._lastGoodStatus.overallState, 'failed');
+    assert.equal(f.extension._preflightOperationId, undefined);
+    assert.equal(f.extension._isLocallyCancelled(f.extension._lastGoodStatus), false);
+    assert.equal(nativeCancels, 0);
+    assert.equal(f.commits(), 0);
+});
+
+test('disable withdrawal survives a failed cancel write and refuses recovery after reenable', () => {
+    const f = fixture();
+    const hud = f.extension._hud;
+    const raw = shutdownReport(f.status);
+    const request = {schema_version: 1, session_id: 'session', operation_id: f.status.operationId,
+        action: 'poweroff', requested_at: new Date().toISOString()};
+    const files = bindReport(f, raw, request);
+    let writes = 0;
+    let nativeCancels = 0;
+    f.main.endSessionDialog = {cancel() { nativeCancels++; }};
+    Object.assign(f.extension, {
+        uuid: 'test-hud', metadata: {version: 18},
+        _preflightOperationId: f.status.operationId, _preflightAction: 'poweroff',
+        _preflightSignal: 'ConfirmedShutdown',
+        _writeProtocolFile() { writes++; throw new Error('disk unavailable'); },
+        _enable() {
+            Object.assign(this, {_hud: hud, _currentSessionId: 'session', _cancelFile: {},
+                _requestFile: files.requestFile, _statusFile: files.statusFile});
+        },
+    });
+    f.extension.disable();
+    assert.equal(writes, 1);
+    assert.equal(nativeCancels, 1);
+    assert.equal(f.extension._locallyCancelledOperationId, null);
+    f.extension.enable();
+    f.extension._recoverPendingPreflightRequest();
+    assert.equal(f.extension._preflightOperationId, null);
+    assert.equal(f.timers.length, 0);
+    f.extension._loadStatus();
+    const late = f.extension._lastGoodStatus;
+    assert.equal(f.extension._isLocallyCancelled(late), true);
+    assert.equal(f.extension._hasShutdownAuthority(late), false);
+    assert.equal(f.extension._preflightOperationId, null);
+    assert.equal(f.extension._shutdownCountdownOperationId, null);
+    assert.equal(f.timers.length, 0);
+    assert.equal(f.paints.length, 0);
+    f.extension._commitShutdown(late);
+    f.extension._commitWrittenOperationId = late.operationId;
+    f.extension._handoffToGnome(late);
+    assert.equal(writes, 1);
+    assert.equal(f.handoffs(), 0);
+    assert.equal(nativeCancels, 1);
+    f.extension.disable();
 });
 
 test('startup null identity never displays handoff while a matching shutdown still does', () => {
@@ -289,7 +459,7 @@ test('settled failed backend does not display pending recovery on repeated publi
 
 test('cancelled completion renders cancellation rather than readiness', () => {
     const {LoginHud} = runInNewContext(
-        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+        source +
             '\n;({LoginHud});', {
             GObject: {registerClass: cls => cls}, St: {Widget: class {}}, Extension: class {},
         });
@@ -526,7 +696,7 @@ test('failed shutdown actions offer logs and dismissal while recovery can contin
         connect(_signal, callback) { this.activate = callback; }
     }
     const {LoginHud} = runInNewContext(
-        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+        source +
             '\n;({LoginHud});', {
             GObject: {registerClass: cls => cls},
             St: {Widget: class {}, Button: Actor, Label: Actor}, Extension: class {},
@@ -554,7 +724,7 @@ test('settled failure offers Close even with unstarted categories, while recover
         connect(_signal, callback) { this.activate = callback; }
     }
     const {LoginHud} = runInNewContext(
-        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+        source +
             '\n;({LoginHud});', {
             GObject: {registerClass: cls => cls},
             St: {Widget: class {}, Button: Actor, Label: Actor}, Extension: class {},

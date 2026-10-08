@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {loadSource} from './load-source.mjs';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
-const code = await readFile(new URL('../extension.js', import.meta.url), 'utf8');
+const code = await loadSource();
 class Actor {
     constructor(props = {}) { Object.assign(this, props); this.children = []; this.clutter_text = {}; }
     add_child(child) { this.children.push(child); }
@@ -11,7 +11,7 @@ class Actor {
     connect(event, callback) { this[event] = callback; }
 }
 const {normalizeAlerts, LoginHud} = runInNewContext(
-    code.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+    code +
     '\n;({normalizeAlerts, LoginHud});', {
         GObject: {registerClass: cls => cls}, St: {Widget: Actor, BoxLayout: Actor, Button: Actor, Label: Actor},
         Extension: class {}, Clutter: {ActorAlign: {END: 1}},

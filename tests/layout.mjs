@@ -1,14 +1,15 @@
-import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import {loadSource} from './load-source.mjs';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
-const source = await readFile(new URL('../extension.js', import.meta.url), 'utf8');
+const source = await loadSource();
 const css = await readFile(new URL('../stylesheet.css', import.meta.url), 'utf8');
 // Exercise the actual layout methods without starting a Shell, reading status,
 // acquiring a grab or sending any desktop/shutdown request.
 const {hudBounds, LoginHud} = runInNewContext(
-    source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+    source +
         '\n;({hudBounds, LoginHud});',
     {GObject: {registerClass: cls => cls}, St: {Widget: class {}}, Extension: class {}}
 );

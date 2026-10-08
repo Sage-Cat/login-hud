@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {fileURLToPath} from 'node:url';
+import {loadSource} from './load-source.mjs';
 
-const extensionPath = fileURLToPath(new URL('../extension.js', import.meta.url));
-const source = await readFile(extensionPath, 'utf8');
+const source = await loadSource();
 
 assert.ok(
     source.includes('Main.layoutManager.addChrome(this._hud, {'),

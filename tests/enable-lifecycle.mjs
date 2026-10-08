@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {loadSource} from './load-source.mjs';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
-const source = await readFile(new URL('../extension.js', import.meta.url), 'utf8');
+const source = await loadSource();
 function fixture({exportFails = false, unexportFails = false} = {}) {
     const cleanup = [];
     let diagnostics;
@@ -21,7 +21,7 @@ function fixture({exportFails = false, unexportFails = false} = {}) {
         Main: {sessionMode: {disconnect() { cleanup.push('disconnect'); }}},
     };
     const {LoginHudExtension, operationContext, normaliseStatus} = runInNewContext(
-        source.replace(/^import .*;\n/gm, '').replace('export default class', 'class') +
+        source +
         '\n;({LoginHudExtension, operationContext, normaliseStatus});', context);
     const extension = new LoginHudExtension();
     extension.uuid = 'test-hud'; extension.metadata = {version: 18};

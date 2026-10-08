@@ -18,7 +18,7 @@ make release-artifacts
 
 `make check` runs metadata and syntax checks, ESLint, shellcheck, static lifecycle
 invariants, and the Node tests. `make release-artifacts` repeats those checks,
-builds the extension ZIP, verifies its exact four-file inventory and metadata,
+builds the extension ZIP, verifies its exact six-file inventory and metadata,
 and writes its checksum to `dist/`. These commands do not install or activate
 the extension.
 

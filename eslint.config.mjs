@@ -1,6 +1,6 @@
 export default [
     {
-        files: ['extension.js'],
+        files: ['extension.js', 'reports.js', 'hudView.js'],
         languageOptions: {
             ecmaVersion: 2022,
             sourceType: 'module',

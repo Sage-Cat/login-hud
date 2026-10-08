@@ -23,7 +23,7 @@ if [ "$#" -ne 0 ]; then
     exit 2
 fi
 
-for file in metadata.json extension.js buildInfo.js stylesheet.css; do
+for file in metadata.json extension.js reports.js hudView.js buildInfo.js stylesheet.css; do
     if [ ! -f "$source_dir/$file" ]; then
         printf 'install: missing source file: %s\n' "$source_dir/$file" >&2
         exit 1

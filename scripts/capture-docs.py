@@ -114,7 +114,7 @@ def main():
         base = root / 'data/gnome-shell/extensions'
         hud = base / HUD
         hud.mkdir(parents=True)
-        for filename in ['extension.js', 'stylesheet.css', 'metadata.json', 'buildInfo.js']:
+        for filename in ['extension.js', 'reports.js', 'hudView.js', 'stylesheet.css', 'metadata.json', 'buildInfo.js']:
             shutil.copyfile(source / filename, hud / filename)
         metadata = json.loads((hud / 'metadata.json').read_text())
         metadata.update(uuid=HUD, name='Disposable documentation HUD')
