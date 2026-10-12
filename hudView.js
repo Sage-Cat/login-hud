@@ -82,11 +82,12 @@ class LoginHud extends St.Widget {
         });
         this._overallProgressFill = new St.Widget({
             style_class: 'login-hud-overall-progress-fill',
-            x_align: Clutter.ActorAlign.START,
+            x_align: Clutter.ActorAlign.FILL,
+            x_expand: true,
             y_expand: true,
+            scale_x: 0,
         });
         this._overallProgressTrack.add_child(this._overallProgressFill);
-        this._overallProgressTrack.connect('notify::width', () => this._updateOverallProgressFill());
         this._notice = new St.Label({
             style_class: 'login-hud-notice',
             visible: false,
@@ -450,10 +451,9 @@ class LoginHud extends St.Widget {
     }
 
     _updateOverallProgressFill() {
-        if (!this._overallProgressTrack.get_stage() || !this._overallProgressTrack.mapped)
-            return;
-        const width = this._overallProgressTrack.width;
-        this._overallProgressFill.set_width(Math.round(width * (this._overallProgress ?? 0)));
+        // Painting a fraction must not invalidate parent layout during allocation.
+        // The fill keeps the track's natural width, including while unmapped.
+        this._overallProgressFill.scale_x = this._overallProgress ?? 0;
     }
 
     _renderNotice() {
@@ -543,17 +543,12 @@ class LoginHud extends St.Widget {
             });
             const fill = new St.Widget({
                 style_class: 'login-hud-progress-fill',
-                x_align: Clutter.ActorAlign.START,
+                x_align: Clutter.ActorAlign.FILL,
+                x_expand: true,
                 y_expand: true,
+                scale_x: stage.fraction,
             });
-            const updateFill = () => {
-                if (!track.get_stage() || !track.mapped)
-                    return;
-                fill.set_width(Math.round(track.width * stage.fraction));
-            };
             track.add_child(fill);
-            track.connect('notify::width', updateFill);
-            track.connect('notify::mapped', updateFill);
             row.add_child(track);
         } else if (!TERMINAL_STATES.has(stage.state)) {
             const indeterminate = new St.BoxLayout({style_class: 'login-hud-indeterminate'});

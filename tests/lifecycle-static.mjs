@@ -240,11 +240,8 @@ assert.match(
 );
 // Cancellation ordering and late status are exercised by shutdown-visibility.mjs.
 
-assert.match(
-    source,
-    /_updateOverallProgressFill\(\) \{\s*if \(!this\._overallProgressTrack\.get_stage\(\) \|\| !this\._overallProgressTrack\.mapped\)\s*return;/,
-    'progress geometry must not be read while actors are unattached'
-);
+// Progress geometry and allocation diagnostics are exercised with actual
+// Clutter actors by workspace-state/tests/integration/run_hud_headless.py.
 // Deferred actor cleanup ordering is exercised by enable-lifecycle.mjs.
 
 
