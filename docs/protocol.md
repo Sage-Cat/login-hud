@@ -17,7 +17,8 @@ status update.
 | --- | --- |
 | `login-hud-status.json` | Coordinator: current startup/shutdown stages and operation evidence. |
 | `alerts.json` | Incident collector: first-party source coverage and active important incidents. |
-| `startup-hud-dismissed.json` | HUD: dismissal bound to session and startup time. |
+| `startup-hud-dismissed.json` | HUD: dismissal bound to session and startup time; `background` keeps restoration running. |
+| `startup-abort.json` | HUD: request to stop the exact current startup restoration. |
 | `shutdown-request.json` | HUD: request after final native confirmation; exact session, operation, and action. |
 | `shutdown-hud-rendered.json` | HUD: current completed status was allocated and painted. |
 | `shutdown-commit.json` | HUD: visible countdown completed for this operation. |
@@ -133,3 +134,33 @@ nullable last-start/finish/success/failure/next-run timestamps. States are
 2 MiB and 256 profiles and requires a fresh running heartbeat for availability.
 These reports are consumed only for startup presentation and cannot authorize
 shutdown, reopen a hidden HUD, or enable cleanup.
+
+
+## Startup controls
+
+Abort restoration atomically writes `startup-abort.json` with `schema_version: 1`,
+`mode: "startup"`, `session_id`, `operation_id`, the exact six-field startup
+`operation_context`, and ISO 8601 `requested_at`. The coordinator validates the
+complete operation identity before stopping remaining restoration work. It
+publishes `operation_state: "cancelling"`, then `"cancelled"` with `cancelled: true`
+and truthful degraded status. Already opened applications remain preserved. Explicit startup `operation_state`
+`running` or `cancelling` keeps active controls available even if a category has
+already made `overall_state` failed or degraded; completed/failed/cancelled
+operation states are terminal. Legacy reports without that lifecycle state use
+the overall state.
+The HUD displays a pending request until backend status confirms the result;
+a failed receipt write leaves restoration active and permits a retry. This file
+has no shutdown or native power-off authority.
+
+Run in background hides the startup HUD and records dismissal reason
+`background`; the backend continues. The accessible top-bar **Workspace
+restoration status** button reopens the current startup report. It deletes only
+a dismissal matching the report's session and startup time, and never starts a
+new operation. Completed or cancelled reports can also be reopened. Reopening
+is unavailable at the lock/greeter boundary and during shutdown.
+
+The same action is exposed as the boolean-returning D-Bus method
+`org.sagecat.LoginHud.ShowStartupStatus` at `/org/sagecat/LoginHud` on the Shell's
+session bus name `org.gnome.Shell`. A true result means the current startup
+report was reopened; false means no eligible report or the dismissal could not
+be removed. The extension removes its top-bar actor on disable.

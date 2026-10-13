@@ -109,3 +109,27 @@ test('diagnostics distinguish withdrawn authorization from scoped backend recove
     assert.equal(next.recovery_pending, false);
     f.extension.disable();
 });
+
+
+test('disable destroys the startup indicator and repeated enable does not retain it', () => {
+    const f = fixture(); f.extension.enable();
+    let destroyed = 0;
+    f.extension._startupIndicator = {destroy() { destroyed++; }};
+    f.extension.disable();
+    assert.equal(destroyed, 1); assert.equal(f.extension._startupIndicator, null);
+    f.extension.enable(); f.extension.disable();
+    assert.equal(destroyed, 1);
+});
+
+
+test('disable unregisters the bounded HUD keyboard focus group before destroying its actor', () => {
+    const f = fixture(); f.extension.enable();
+    const panel = {};
+    f.extension._hud.getInteractiveActor = () => panel;
+    f.extension._hudFocusManager = {remove_group(actor) {
+        assert.equal(actor, panel); f.cleanup.push('remove-focus-group');
+    }};
+    f.extension.disable();
+    assert.ok(f.cleanup.indexOf('remove-focus-group') < f.cleanup.indexOf('destroy'));
+    assert.equal(f.extension._hudFocusManager, null);
+});

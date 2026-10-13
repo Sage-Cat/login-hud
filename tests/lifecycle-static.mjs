@@ -35,7 +35,7 @@ assert.match(
 );
 assert.match(
     source,
-    /const eligible = parsed\.mode === 'shutdown' \|\| parsed\.showOnStartup;\s*if \(eligible\) \{\s*this\._installHudChrome\(\);\s*this\._hud\.setStatus\(parsed\);/,
+    /const eligible = parsed\.mode === 'shutdown' \|\| parsed\.showOnStartup \|\| this\._startupReopened;\s*if \(eligible\) \{\s*this\._installHudChrome\(\);\s*this\._hud\.setStatus\(parsed\);/,
     'Shell chrome must be installed before status can trigger layout work'
 );
 assert.match(
@@ -246,3 +246,8 @@ assert.match(
 
 
 console.log('check: lifecycle safety invariants passed');
+
+
+assert.match(source,
+    /this\._hudFocusManager = St\.FocusManager\.get_for_stage\(global\.stage\);\s*this\._hudFocusManager\.add_group\(this\._hud\.getInteractiveActor\(\)\);/,
+    'bounded interactive chrome must register native keyboard navigation without a modal grab');

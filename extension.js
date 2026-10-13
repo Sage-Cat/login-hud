@@ -8,6 +8,7 @@ import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {State as ModalDialogState} from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import {BUILD_REVISION} from './buildInfo.js';
@@ -22,7 +23,7 @@ import {
     SHUTDOWN_COUNTDOWN_SECONDS, PREFLIGHT_STATUS_TIMEOUT_MS, GC_MAX_STATUS_BYTES,
     PREPARED_POLL_TIMEOUT_MS, STALE_STARTUP_PRESENTATION_MS,
     normaliseStatus, normalizeAlerts, normalizeGcProfiles,
-    shutdownRecoveryPending, sameOperationContext,
+    shutdownRecoveryPending, startupRestorationTerminal, sameOperationContext,
 } from './reports.js';
 
 export default class LoginHudExtension extends Extension {
@@ -38,7 +39,8 @@ export default class LoginHudExtension extends Extension {
             if (this._legacyPassive)
                 return;
             this._diagnostics = Gio.DBusExportedObject.wrapJSObject(
-                '<node><interface name="org.sagecat.LoginHud"><method name="GetState"><arg type="s" direction="out"/></method></interface></node>', {
+                '<node><interface name="org.sagecat.LoginHud"><method name="ShowStartupStatus"><arg type="b" direction="out"/></method><method name="GetState"><arg type="s" direction="out"/></method></interface></node>', {
+                    ShowStartupStatus: () => this._showStartupStatus(),
                     GetState: () => JSON.stringify({build: {
                         uuid: this.uuid, version: this.metadata.version, revision: BUILD_REVISION,
                         sourceIdentityKnown: BUILD_REVISION !== 'development',
@@ -47,7 +49,8 @@ export default class LoginHudExtension extends Extension {
                     local_cancelled: this._isLocallyCancelled(this._lastGoodStatus),
                     recovery_pending: shutdownRecoveryPending(this._lastGoodStatus,
                         this._isLocallyCancelled(this._lastGoodStatus)),
-                    cancel_request_written: Boolean(this._cancelRequestPending)}),
+                    cancel_request_written: Boolean(this._cancelRequestPending),
+                    startup_abort_requested: Boolean(this._startupAbortPending)}),
                 });
             this._diagnostics.export(Gio.DBus.session, '/org/sagecat/LoginHud');
         } catch (error) {
@@ -85,6 +88,9 @@ export default class LoginHudExtension extends Extension {
         this._gcRefreshId = 0;
         this._dismissedFile = this._statusDirectory.get_child(DISMISSED_FILENAME);
         this._cancelFile = this._statusDirectory.get_child(CANCEL_FILENAME);
+        this._startupAbortFile = this._statusDirectory.get_child('startup-abort.json');
+        this._startupAbortPending = false;
+        this._startupReopened = false;
         this._requestFile = this._statusDirectory.get_child(REQUEST_FILENAME);
         this._renderedFile = this._statusDirectory.get_child(RENDERED_FILENAME);
         this._commitFile = this._statusDirectory.get_child(COMMIT_FILENAME);
@@ -124,6 +130,7 @@ export default class LoginHudExtension extends Extension {
         this._locallyCancelledOperationId = null;
         this._chromeInstalled = false;
         this._panelChromeTracked = false;
+        this._hudFocusManager = null;
         this._currentSessionId = null;
         this._sessionIdResolvePending = false;
         this._sessionIdRetryId = 0;
@@ -140,9 +147,29 @@ export default class LoginHudExtension extends Extension {
             () => this._dismissHud(),
             path => this._openErrorLog(path),
             status => this._requestCancel(status),
-            (source, code) => this._ackAlert(source, code)
+            (source, code) => this._ackAlert(source, code),
+            status => this._requestStartupAbort(status),
+            () => this._backgroundStartup()
         );
         this._hud.visible = false;
+        this._startupIndicator = new PanelMenu.Button(0, 'Workspace restoration status', true);
+        this._startupIndicator.accessible_name = 'Show workspace restoration status';
+        this._startupIndicator.can_focus = true;
+        this._startupIndicator.add_child(new St.Icon({
+            icon_name: 'view-refresh-symbolic', style_class: 'system-status-icon',
+        }));
+        this._startupIndicator.connect('button-press-event', () => {
+            this._showStartupStatus();
+            return Clutter.EVENT_STOP;
+        });
+        this._startupIndicator.connect('key-press-event', (_actor, event) => {
+            if (![Clutter.KEY_Return, Clutter.KEY_KP_Enter, Clutter.KEY_space].includes(event.get_key_symbol()))
+                return Clutter.EVENT_PROPAGATE;
+            this._showStartupStatus();
+            return Clutter.EVENT_STOP;
+        });
+        this._startupIndicator.visible = false;
+        Main.panel.addToStatusArea('workspace-restoration', this._startupIndicator);
         this._hudKeyPressId = this._hud.connect('key-press-event',
             (_actor, event) => this._handleHudKeyPress(event));
         this._sessionModeUpdatedId = Main.sessionMode.connect('updated', () => {
@@ -198,6 +225,8 @@ export default class LoginHudExtension extends Extension {
         this._nativeCloseCancel = null;
         this._cleanup(() => this._diagnostics?.unexport());
         this._diagnostics = null;
+        this._cleanup(() => this._startupIndicator?.destroy());
+        this._startupIndicator = null;
         if (this._legacyPassive) {
             this._legacyPassive = false;
             return;
@@ -235,6 +264,9 @@ export default class LoginHudExtension extends Extension {
         if (this._sessionModeUpdatedId)
             this._cleanup(() => Main.sessionMode.disconnect(this._sessionModeUpdatedId));
         this._releaseModal();
+        if (this._hudFocusManager && this._hud)
+            this._cleanup(() => this._hudFocusManager.remove_group(this._hud.getInteractiveActor()));
+        this._hudFocusManager = null;
         if (this._hud) {
             this._cleanup(() => this._hud.cancelDeferredUpdates());
             if (this._hudKeyPressId)
@@ -275,6 +307,9 @@ export default class LoginHudExtension extends Extension {
         this._gcSerial++;
         this._dismissedFile = null;
         this._cancelFile = null;
+        this._startupAbortFile = null;
+        this._startupAbortPending = false;
+        this._startupReopened = false;
         this._requestFile = null;
         this._renderedFile = null;
         this._commitFile = null;
@@ -650,7 +685,7 @@ export default class LoginHudExtension extends Extension {
     }
 
     _startupCanAutoDismiss(status) {
-        if (status?.mode !== 'startup')
+        if (status?.mode !== 'startup' || !startupRestorationTerminal(status))
             return false;
         const hasFailure = status.overallState === 'failed' ||
             status.stages.some(stage => stage.state === 'failed');
@@ -695,6 +730,77 @@ export default class LoginHudExtension extends Extension {
         }
     }
 
+    _startupAbortMatches(status) {
+        const receipt = this._readProtocolFileSync(this._startupAbortFile);
+        return receipt?.schema_version === 1 && receipt.mode === 'startup' &&
+            receipt.session_id === status.sessionId && receipt.operation_id === status.operationId &&
+            sameOperationContext(receipt.operation_context, status.operationContext);
+    }
+
+    _startupAbortAvailable(status) {
+        const context = status?.operationContext;
+        return status?.mode === 'startup' && status.sessionId === this._currentSessionId &&
+            this._isCurrentOperation(status) && Boolean(status.operationId) &&
+            context?.mode === 'startup' && context.operation_id === status.operationId &&
+            context.boot_id === this._bootId && context.login_generation === this._currentSessionId &&
+            context.deadline > GLib.get_monotonic_time() / 1000000 &&
+            !startupRestorationTerminal(status) && status.operationState !== 'cancelling';
+    }
+
+    _requestStartupAbort(status) {
+        if (!this._startupAbortAvailable(status))
+            return false;
+        if (this._startupAbortPending || this._startupAbortMatches(status)) {
+            this._startupAbortPending = true;
+            this._hud.setStartupAbortPending(true);
+            return true;
+        }
+        try {
+            this._writeProtocolFile(this._startupAbortFile, 'startup-abort', {
+                schema_version: 1, mode: 'startup', session_id: status.sessionId,
+                operation_id: status.operationId, operation_context: status.operationContext,
+                requested_at: new Date().toISOString(),
+            });
+            this._startupAbortPending = true;
+            this._hud.setStartupAbortPending(true);
+            return true;
+        } catch (error) {
+            this._hud.setTransportNotice(`Restoration continues: the abort request could not be written: ${error.message}`);
+            return false;
+        }
+    }
+
+    _backgroundStartup() {
+        if (this._lastGoodStatus?.mode !== 'startup')
+            return false;
+        this._startupReopened = false;
+        this._recordStartupDismissal(this._lastGoodStatus, 'background');
+        this._syncVisibility();
+        return true;
+    }
+
+    _showStartupStatus() {
+        const status = this._lastGoodStatus;
+        if (status?.mode !== 'startup' || status.sessionId !== this._currentSessionId ||
+            Main.sessionMode.isLocked || Main.sessionMode.isGreeter)
+            return false;
+        try {
+            if (this._startupDismissalMatches(status))
+                this._dismissedFile.delete(null);
+        } catch (error) {
+            this._hud.setTransportNotice(`Could not reopen restoration status: ${error.message}`);
+            return false;
+        }
+        this._startupReopened = true;
+        this._dismissed = false;
+        this._installHudChrome();
+        this._hud.setStatus(status);
+        this._hud.setStartupAbortPending(this._startupAbortPending);
+        this._syncVisibility();
+        this._hud.focusPrimaryAction();
+        return true;
+    }
+
     _handleHudKeyPress(event) {
         if (event.get_key_symbol() !== Clutter.KEY_Escape ||
             this._lastGoodStatus?.mode !== 'shutdown')
@@ -716,8 +822,10 @@ export default class LoginHudExtension extends Extension {
             // allow a delayed ready update to authorize this shutdown again.
             this._withdrawShutdownAuthority(status);
         }
-        if (status?.mode === 'startup')
+        if (status?.mode === 'startup') {
+            this._startupReopened = false;
             this._recordStartupDismissal(status, 'user');
+        }
         else
             this._dismissed = true;
         this._syncVisibility();
@@ -742,6 +850,10 @@ export default class LoginHudExtension extends Extension {
             affectsInputRegion: true,
         });
         this._panelChromeTracked = true;
+        // Native Tab navigation needs a focus group even for nonmodal chrome.
+        // Register only the bounded panel; desktop input remains ungrabbed.
+        this._hudFocusManager = St.FocusManager.get_for_stage(global.stage);
+        this._hudFocusManager.add_group(this._hud.getInteractiveActor());
         this._syncHudSize();
         this._stageSizeChangedId = global.stage.connect('notify::width', () => this._syncHudSize());
         this._stageHeightChangedId = global.stage.connect('notify::height', () => this._syncHudSize());
@@ -768,6 +880,9 @@ export default class LoginHudExtension extends Extension {
         if (!this._hud)
             return;
         const atSessionBoundary = Main.sessionMode.isLocked || Main.sessionMode.isGreeter;
+        if (this._startupIndicator)
+            this._startupIndicator.visible = this._lastGoodStatus?.mode === 'startup' &&
+                this._lastGoodStatus.sessionId === this._currentSessionId && !atSessionBoundary;
         if (!this._dismissed && atSessionBoundary &&
             this._startupCanAutoDismiss(this._lastGoodStatus))
             this._recordStartupDismissal(this._lastGoodStatus, 'session-boundary');
@@ -775,7 +890,7 @@ export default class LoginHudExtension extends Extension {
         // available.  In particular, extension enablement must be passive
         // while GNOME is bringing up the session and display stack.
         const eligible = this._lastGoodStatus?.mode === 'shutdown' ||
-            this._lastGoodStatus?.showOnStartup === true;
+            this._lastGoodStatus?.showOnStartup === true || this._startupReopened;
         const visible = Boolean(this._lastGoodStatus) && eligible && !this._dismissed &&
             !atSessionBoundary;
         if (!visible)
@@ -1499,6 +1614,8 @@ export default class LoginHudExtension extends Extension {
                 if (isNewSessionOrMode) {
                     this._cancelShutdownCountdown();
                     this._dismissed = false;
+                    this._startupReopened = false;
+                    this._startupAbortPending = false;
                     this._activeSessionId = parsed.sessionId;
                     this._activeMode = parsed.mode;
                     this._activeOperationId = parsed.operationId;
@@ -1514,7 +1631,7 @@ export default class LoginHudExtension extends Extension {
                 if (parsed.mode === 'startup') {
                     if (this._startupDismissalMatches(parsed)) {
                         this._dismissed = true;
-                    } else if (this._startupPresentationIsStale(parsed)) {
+                    } else if (!this._startupReopened && this._startupPresentationIsStale(parsed)) {
                         this._recordStartupDismissal(parsed, 'stale-completion');
                     }
                 }
@@ -1543,10 +1660,15 @@ export default class LoginHudExtension extends Extension {
                     this._loadAlerts();
                 if (parsed.mode === 'startup')
                     this._loadGcProfiles();
-                const eligible = parsed.mode === 'shutdown' || parsed.showOnStartup;
+                if (parsed.mode === 'startup')
+                    this._startupAbortPending = !startupRestorationTerminal(parsed) &&
+                        (parsed.operationState === 'cancelling' || this._startupAbortMatches(parsed));
+                const eligible = parsed.mode === 'shutdown' || parsed.showOnStartup || this._startupReopened;
                 if (eligible) {
                     this._installHudChrome();
                     this._hud.setStatus(parsed);
+                    if (parsed.mode === 'startup')
+                        this._hud.setStartupAbortPending(this._startupAbortPending);
                     const showShutdownProgress = this._shutdownStatusReady(parsed);
                     if (showShutdownProgress && this._nativeHandoffOperationId === parsed.operationId) {
                         this._hud.setHandoffStarted(parsed.shutdownAction || this._preflightAction);

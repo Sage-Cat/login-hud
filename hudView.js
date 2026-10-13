@@ -5,7 +5,7 @@ import GObject from 'gi://GObject';
 import St from 'gi://St';
 import {Spinner} from 'resource:///org/gnome/shell/ui/animation.js';
 import {
-    TERMINAL_STATES, GC_MAX_PROFILES, shutdownRecoveryPending, gcViewKey, gcProfilePresentation,
+    TERMINAL_STATES, GC_MAX_PROFILES, shutdownRecoveryPending, startupRestorationTerminal, gcViewKey, gcProfilePresentation,
     gcEventTime, elapsedSince, stateIcon, displayState, eventTime, overallFraction,
     hudBounds,
 } from './reports.js';
@@ -27,6 +27,7 @@ class LoginHud extends St.Widget {
         this._onOpenLogRequested = null;
         this._onCancelRequested = null;
         this._cancelPending = false;
+        this._startupAbortPending = false;
         this._primaryAction = null;
         this._expandedJobs = new Set();
         this._overallProgressFillId = 0;
@@ -123,11 +124,14 @@ class LoginHud extends St.Widget {
         this._panel.add_child(this._actions);
     }
 
-    setCallbacks(onCloseRequested, onOpenLogRequested, onCancelRequested, onAlertAckRequested = null) {
+    setCallbacks(onCloseRequested, onOpenLogRequested, onCancelRequested, onAlertAckRequested = null,
+        onStartupAbortRequested = null, onBackgroundRequested = null) {
         this._onCloseRequested = onCloseRequested;
         this._onOpenLogRequested = onOpenLogRequested;
         this._onCancelRequested = onCancelRequested;
         this._onAlertAckRequested = onAlertAckRequested;
+        this._onStartupAbortRequested = onStartupAbortRequested;
+        this._onBackgroundRequested = onBackgroundRequested;
     }
 
     setStatus(status) {
@@ -141,7 +145,9 @@ class LoginHud extends St.Widget {
         this._kicker.text = isShutdown
             ? 'SYSTEM / SHUTDOWN TELEMETRY'
             : 'SESSION / STARTUP TELEMETRY';
-        this._title.text = isShutdown && status.cancelled
+        this._title.text = !isShutdown && (status.cancelled || status.operationState === 'cancelled')
+            ? 'Restoration stopped'
+            : isShutdown && status.cancelled
             ? 'System shutdown cancelled'
             : status.overallState === 'failed'
             ? isShutdown ? 'System shutdown needs attention' : 'Session startup needs attention'
@@ -154,7 +160,9 @@ class LoginHud extends St.Widget {
                 : isShutdown ? 'Deinitializing system' : 'Restoring workspace';
         this._overall.text = isShutdown
             ? `System shutdown: ${status.overallMessage}`
-            : status.overallMessage;
+            : status.cancelled || status.operationState === 'cancelled'
+                ? 'Restoration stopped. Applications already opened are preserved; remaining restoration work was cancelled.'
+                : status.overallMessage;
         this._overallProgress = overallFraction(status.stages);
         this._overallProgressLabel.text = `Overall progress ${Math.round(this._overallProgress * 100)}%`;
         this.scheduleProgressFill();
@@ -172,6 +180,12 @@ class LoginHud extends St.Widget {
 
     setCancellationPending(pending) {
         this._cancelPending = pending;
+        if (this._status)
+            this._renderActions(this._status);
+    }
+
+    setStartupAbortPending(pending) {
+        this._startupAbortPending = pending;
         if (this._status)
             this._renderActions(this._status);
     }
@@ -625,11 +639,56 @@ class LoginHud extends St.Widget {
     }
 
     _renderActions(status) {
+        const focus = this._actions.get_stage?.()?.get_key_focus();
+        const focusedAction = focus ? this._actions.get_children().find(actor =>
+            actor === focus || actor.contains?.(focus)) : null;
+        const focusedKey = focusedAction?._loginHudAction;
+        this._rebuildActions(status);
+        if (!focusedKey)
+            return;
+        const available = this._actions.get_children().filter(actor => actor.can_focus && actor.reactive);
+        const replacement = available.find(actor => actor._loginHudAction === focusedKey) ??
+            (focusedKey === 'startup-abort'
+                ? available.find(actor => actor._loginHudAction === 'startup-background') : null);
+        replacement?.grab_key_focus();
+    }
+
+    _rebuildActions(status) {
         this.scheduleProgressFill();
         this._actions.destroy_all_children();
         this._primaryAction = null;
         const hasFailure = status.overallState === 'failed' || status.stages.some(stage => stage.state === 'failed');
         const allTerminal = status.stages.length > 0 && status.stages.every(stage => TERMINAL_STATES.has(stage.state));
+
+        if (status.mode === 'startup') {
+            const terminal = startupRestorationTerminal(status);
+            if (!terminal) {
+                const pending = this._startupAbortPending || status.operationState === 'cancelling';
+                const abort = new St.Button({
+                    style_class: 'login-hud-button login-hud-button-cancel',
+                    label: pending ? 'Abort requested…' : 'Abort restoration',
+                    accessible_name: pending ? 'Restoration abort requested' : 'Abort restoration',
+                    can_focus: true, reactive: !pending && Boolean(status.operationContext && status.operationId),
+                });
+                abort._loginHudAction = 'startup-abort';
+                abort.connect('clicked', () => this._onStartupAbortRequested?.(status));
+                this._actions.add_child(abort);
+                this._primaryAction = abort;
+                const background = new St.Button({
+                    style_class: 'login-hud-button', label: 'Run in background',
+                    accessible_name: 'Run restoration in background', can_focus: true, reactive: true,
+                });
+                background._loginHudAction = 'startup-background';
+                background.connect('clicked', () => this._onBackgroundRequested?.());
+                this._actions.add_child(background);
+                if (!abort.reactive)
+                    this._primaryAction = background;
+            } else if (!hasFailure) {
+                this._addCloseButton('OK', true);
+            }
+            if (!hasFailure)
+                return;
+        }
 
         if (hasFailure) {
             const button = new St.Button({
@@ -638,6 +697,7 @@ class LoginHud extends St.Widget {
                 can_focus: true,
                 reactive: true,
             });
+            button._loginHudAction = 'error-log';
             button.connect('clicked', () => this._onOpenLogRequested?.(status.errorLogPath));
             this._actions.add_child(button);
             this._primaryAction = button;
@@ -665,6 +725,7 @@ class LoginHud extends St.Widget {
                 can_focus: true,
                 reactive: !this._cancelPending,
             });
+            button._loginHudAction = 'shutdown-cancel';
             button.connect('clicked', () => this._onCancelRequested?.(status));
             this._actions.add_child(button);
             this._primaryAction = button;
@@ -682,6 +743,7 @@ class LoginHud extends St.Widget {
             can_focus: true,
             reactive: true,
         });
+        button._loginHudAction = 'close';
         button.connect('clicked', () => this._onCloseRequested?.());
         this._actions.add_child(button);
         if (!this._primaryAction)

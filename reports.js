@@ -133,6 +133,13 @@ function shutdownRecoveryPending(status, locallyCancelled = false) {
         status.stages.some(stage => !TERMINAL_STATES.has(stage.state));
 }
 
+function startupRestorationTerminal(status) {
+    // A category failure does not finish the coordinator's remaining work.
+    return status.cancelled || ['completed', 'failed', 'cancelled'].includes(status.operationState) ||
+        (!['running', 'cancelling'].includes(status.operationState) &&
+            TERMINAL_STATES.has(status.overallState));
+}
+
 function operationContext(raw, mode, operationId) {
     if (raw === undefined)
         return null; // Old status remains presentation-only during upgrades.
@@ -184,7 +191,7 @@ function normaliseStatus(raw) {
         throw new Error(`Unknown overall state: ${String(raw.overall_state)}.`);
     if (!Array.isArray(raw.stages))
         throw new Error('The stages field must be an array.');
-    const operationId = mode === 'shutdown' ? text(raw.operation_id) : null;
+    const operationId = text(raw.operation_id) || null;
     if (mode === 'shutdown' && !operationId)
         throw new Error('The shutdown status is missing operation_id.');
     const shutdownAction = mode === 'shutdown' && SHUTDOWN_ACTIONS.has(raw.shutdown_action)
@@ -459,7 +466,7 @@ export {
     PREPARED_POLL_TIMEOUT_MS, STALE_STARTUP_PRESENTATION_MS, GC_STALE_AFTER_MS,
     GC_FUTURE_TOLERANCE_MS, GC_MAX_STATUS_BYTES, GC_MAX_PROFILES, GC_STATES,
     text, fraction, stageProgress, aggregateState, groupStages,
-    shutdownRecoveryPending, operationContext, sameOperationContext, gcViewKey,
+    shutdownRecoveryPending, startupRestorationTerminal, operationContext, sameOperationContext, gcViewKey,
     normaliseStatus, elapsedSince, displayState, eventTime, stateIcon,
     overallFraction, normalizeAlerts, safeGcName, gcTimestamp,
     normalizeGcProfiles, gcProfilePresentation, gcEventTime, hudBounds,
