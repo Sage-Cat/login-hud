@@ -639,11 +639,24 @@ class LoginHud extends St.Widget {
     }
 
     _renderActions(status) {
+        this._status = status;
+        this.scheduleProgressFill();
+        const startupKey = status.mode === 'startup' ? JSON.stringify({
+            session: status.sessionId, operation: status.operationId, started: status.startedAt,
+            context: status.operationContext,
+            terminal: startupRestorationTerminal(status),
+            pending: Boolean(this._startupAbortPending || status.operationState === 'cancelling'),
+            failure: status.overallState === 'failed' || status.stages.some(stage => stage.state === 'failed'),
+            log: status.errorLogPath,
+        }) : null;
+        if (startupKey !== null && startupKey === this._startupActionKey)
+            return;
         const focus = this._actions.get_stage?.()?.get_key_focus();
         const focusedAction = focus ? this._actions.get_children().find(actor =>
             actor === focus || actor.contains?.(focus)) : null;
         const focusedKey = focusedAction?._loginHudAction;
         this._rebuildActions(status);
+        this._startupActionKey = startupKey;
         if (!focusedKey)
             return;
         const available = this._actions.get_children().filter(actor => actor.can_focus && actor.reactive);
@@ -654,7 +667,6 @@ class LoginHud extends St.Widget {
     }
 
     _rebuildActions(status) {
-        this.scheduleProgressFill();
         this._actions.destroy_all_children();
         this._primaryAction = null;
         const hasFailure = status.overallState === 'failed' || status.stages.some(stage => stage.state === 'failed');
@@ -671,7 +683,7 @@ class LoginHud extends St.Widget {
                     can_focus: true, reactive: !pending && Boolean(status.operationContext && status.operationId),
                 });
                 abort._loginHudAction = 'startup-abort';
-                abort.connect('clicked', () => this._onStartupAbortRequested?.(status));
+                abort.connect('clicked', () => this._onStartupAbortRequested?.(this._status));
                 this._actions.add_child(abort);
                 this._primaryAction = abort;
                 const background = new St.Button({
@@ -698,7 +710,8 @@ class LoginHud extends St.Widget {
                 reactive: true,
             });
             button._loginHudAction = 'error-log';
-            button.connect('clicked', () => this._onOpenLogRequested?.(status.errorLogPath));
+            button.connect('clicked', () => this._onOpenLogRequested?.(
+                status.mode === 'startup' ? this._status.errorLogPath : status.errorLogPath));
             this._actions.add_child(button);
             this._primaryAction = button;
             if (status.mode === 'shutdown') {

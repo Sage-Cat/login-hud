@@ -1058,7 +1058,8 @@ test('status action rebuild preserves keyboard focus and moves pending abort foc
     for (const key of ['startup-abort', 'startup-background']) {
         focus = children.find(actor => actor._loginHudAction === key);
         const previous = focus;
-        hud._renderActions(status);
+        hud._renderActions({...status, operationContext: {...status.operationContext,
+            attempt: key === 'startup-abort' ? 2 : 3}});
         assert.notEqual(focus, previous);
         assert.equal(focus._loginHudAction, key);
     }
@@ -1075,4 +1076,92 @@ test('status action rebuild preserves keyboard focus and moves pending abort foc
     focus = children.find(actor => actor._loginHudAction === 'error-log');
     hud._renderActions({...status, overallState: 'failed', stages: [{state: 'failed'}]});
     assert.equal(focus._loginHudAction, 'error-log');
+});
+
+
+function actionReuseFixture() {
+    let focus = null; let destroyed = 0;
+    const children = []; const callbacks = [];
+    class Actor {
+        constructor(props) { Object.assign(this, props); }
+        connect(_signal, callback) { this.click = callback; }
+        grab_key_focus() { focus = this; }
+        contains(actor) { return this === actor; }
+        press() { this.pressed = true; }
+        release() { if (this.pressed && !this.destroyed && this.reactive) this.click(); }
+    }
+    const {LoginHud} = runInNewContext(source + '\n;({LoginHud});', {
+        GObject: {registerClass: cls => cls}, St: {Widget: class {}, Button: Actor, Label: Actor},
+        Extension: class {},
+    });
+    const hud = Object.assign(Object.create(LoginHud.prototype), {
+        _actions: {
+            get_stage: () => ({get_key_focus: () => focus}), get_children: () => children,
+            destroy_all_children() {
+                for (const actor of children) { actor.destroyed = true; destroyed++; }
+                if (children.includes(focus)) focus = null;
+                children.length = 0;
+            }, add_child(actor) { children.push(actor); },
+        }, scheduleProgressFill() {},
+        _onStartupAbortRequested(status) { callbacks.push(status); },
+    });
+    return {hud, children, callbacks, focus: () => focus, destroyed: () => destroyed};
+}
+
+test('startup buttons survive progress publications and press-release uses the latest status', () => {
+    const f = actionReuseFixture(); const status = startupFixture().status;
+    f.hud._renderActions(status);
+    const original = [...f.children]; const primary = f.hud._primaryAction;
+    original[0].grab_key_focus(); original[0].press();
+    const latest = {...status, overallMessage: 'Verified another application',
+        stages: [{state: 'running', message: 'Progress changed', fraction: .5}]};
+    f.hud._renderActions(latest);
+    assert.deepEqual(f.children, original);
+    assert.equal(f.destroyed(), 0); assert.equal(f.hud._primaryAction, primary);
+    assert.equal(f.focus(), original[0]);
+    original[0].release();
+    assert.equal(f.callbacks.length, 1); assert.equal(f.callbacks[0], latest);
+});
+
+test('startup action actors rebuild for authority, pending, failure, log-target and terminal changes', () => {
+    const base = startupFixture().status;
+    const mutations = [
+        status => ({...status, operationContext: {...status.operationContext, attempt: 2}}),
+        status => ({...status, operationContext: {...status.operationContext, deadline: 2000}}),
+        status => ({...status, operationId: 'b'.repeat(32)}),
+        status => ({...status, sessionId: 'new-login'}),
+        status => ({...status, operationState: 'cancelling'}),
+        status => ({...status, overallState: 'failed', stages: [{state: 'failed'}]}),
+        status => ({...status, errorLogPath: '/tmp/new-synthetic-error.log'}),
+        status => ({...status, overallState: 'degraded', operationState: 'cancelled', cancelled: true}),
+    ];
+    for (const mutate of mutations) {
+        const f = actionReuseFixture(); f.hud._renderActions(base);
+        const old = [...f.children]; f.hud._renderActions(mutate(base));
+        assert.ok(old.every(actor => actor.destroyed));
+        assert.ok(f.children.every(actor => !old.includes(actor)));
+    }
+    const f = actionReuseFixture(); f.hud._renderActions(base);
+    const old = f.children[0]; f.hud.setStartupAbortPending(true);
+    assert.equal(old.destroyed, true); assert.equal(f.children[0].reactive, false);
+});
+
+test('running failed startup reuses its log and actions while shutdown always rebuilds', () => {
+    const f = actionReuseFixture(); const base = {...startupFixture().status,
+        overallState: 'failed', stages: [{state: 'failed'}, {state: 'running'}],
+        errorLogPath: '/tmp/synthetic-error.log'};
+    f.hud._renderActions(base);
+    const first = [...f.children]; const primary = f.hud._primaryAction;
+    f.hud._renderActions({...base, stages: [{state: 'failed', message: 'Same failure'},
+        {state: 'running', message: 'Another application is waiting'}]});
+    assert.deepEqual(f.children, first); assert.equal(f.hud._primaryAction, primary);
+    let log = null; f.hud._onOpenLogRequested = path => { log = path; };
+    f.children.find(actor => actor._loginHudAction === 'error-log').click();
+    assert.equal(log, '/tmp/synthetic-error.log');
+    const shutdown = fixture().status;
+    f.hud._renderActions(shutdown); const cancel = f.children[0];
+    f.hud._renderActions(shutdown);
+    assert.notEqual(f.children[0], cancel); assert.equal(cancel.destroyed, true);
+    f.hud._renderActions(base);
+    assert.ok(f.children.every(actor => !first.includes(actor)));
 });
