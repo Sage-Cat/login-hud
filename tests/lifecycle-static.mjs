@@ -35,7 +35,7 @@ assert.match(
 );
 assert.match(
     source,
-    /const eligible = parsed\.mode === 'shutdown' \|\| parsed\.showOnStartup \|\| this\._startupReopened;\s*if \(eligible\) \{\s*this\._installHudChrome\(\);\s*this\._hud\.setStatus\(parsed\);/,
+    /if \(parsed\.showOnStartup \|\| this\._startupReopened\) \{\s*this\._installHudChrome\(\);\s*this\._hud\.setStatus\(parsed\);/,
     'Shell chrome must be installed before status can trigger layout work'
 );
 assert.match(
@@ -68,180 +68,42 @@ assert.match(
     /_installHudChrome\(\) \{[\s\S]*?this\._clockId = GLib\.timeout_add_seconds/,
     'periodic HUD work must start only with the validated HUD'
 );
-assert.match(
-    source,
-    /const shouldBeModal = this\._hud\?\.visible && status\?\.mode === 'shutdown'/,
-    'a modal grab must be gated to shutdown mode'
+assert.ok(
+    !/\bpushModal\b|\bpopModal\b|SYSTEM_MODAL/.test(source),
+    'the HUD must never take a modal input grab'
 );
-assert.match(
-    source,
-    /const terminalShutdown = parsed\.mode === 'shutdown'[\s\S]*?!matchesRequest && !matchesLocalPreflight && !terminalShutdown/,
-    'a terminal shutdown failure must remain visible after active request cleanup'
-);
-assert.match(
-    source,
-    /_openErrorLog\(path\)[\s\S]*?const keepVisible = status\?\.mode === 'shutdown' && hasFailure;[\s\S]*?if \(!keepVisible\) \{\s*this\._dismissed = true;/,
-    'opening the full error log must not dismiss a failed shutdown HUD'
-);
-assert.match(
-    source,
-    /const grab = Main\.pushModal\(this\._hud, \{[\s\S]*?actionMode: Shell\.ActionMode\.SYSTEM_MODAL/,
-    'shutdown cancellation must retain its system-modal grab'
-);
-assert.match(
-    source,
-    /_cancelNativeEndSessionOnce\(operationId\)[\s\S]*?Main\.endSessionDialog\?\.cancel\?\.\(\)/,
-    'one HUD cancellation must also cancel GNOME\'s original inhibited request'
-);
-assert.match(
-    source,
-    /this\._originalEndSessionConfirm = dialog\._confirm;[\s\S]*?dialog\._confirm = this\._wrappedEndSessionConfirm;/,
-    'GNOME confirmation must be intercepted before ConfirmedShutdown/ConfirmedReboot is emitted'
-);
-assert.match(
-    source,
-    /_interceptEndSessionConfirm\(signal\)[\s\S]*?!this\._shutdownCoordinatorIsActive\(\)[\s\S]*?return this\._originalEndSessionConfirm\.call\(this\._endSessionDialog, signal\)/,
-    'a missing shutdown coordinator must fail open to GNOME native shutdown'
-);
-assert.match(
-    source,
-    /_shutdownCoordinatorIsActive\(\)[\s\S]*?'GetUnit'[\s\S]*?SHUTDOWN_COORDINATOR_UNIT[\s\S]*?'ActiveState'[\s\S]*?recursiveUnpack\(\)[\s\S]*?=== 'active'[\s\S]*?return false;/,
-    'shutdown interception must require the live companion systemd service'
-);
-assert.match(
-    source,
-    /this\._endSessionDialog\._confirm === this\._wrappedEndSessionConfirm[\s\S]*?this\._endSessionDialog\._confirm = this\._originalEndSessionConfirm;/,
-    'the GNOME confirmation wrapper must be restored without clobbering another wrapper'
-);
-assert.match(
-    source,
-    /operation_id: operationId,\s*session_id: sessionId,\s*action,\s*requested_at:/,
-    'the preflight request must bind operation, session, and exact GNOME action'
-);
-assert.match(
-    source,
-    /_interceptEndSessionConfirm\(signal\)[\s\S]*?await this\._closeNativeDialogBeforePreflight\(\);[\s\S]*?this\._writeProtocolFile\(this\._requestFile/,
-    'the native confirmation must be fully closed before the HUD request is published'
-);
-assert.match(
-    source,
-    /_closeNativeDialogBeforePreflight\(\)[\s\S]*?dialog\.state === ModalDialogState\.CLOSED[\s\S]*?dialog\.connect\('closed'/,
-    'the timer path must wait for GNOME confirmation closure'
-);
-assert.match(
-    source,
-    /if \(this\._nativeHandoffOperationId\)\s*return this\._originalEndSessionConfirm/,
-    'a later Power Off Anyway confirmation must continue the prepared action without another preflight'
-);
-assert.match(
-    source,
-    /Clutter\.threads_add_repaint_func_full\([\s\S]*?Clutter\.RepaintFlags\.POST_PAINT[\s\S]*?this\._writeProtocolFile\(this\._renderedFile/,
-    'the rendered acknowledgement must only be written after a Shell paint'
-);
-assert.match(
-    source,
-    /!this\._hud\.mapped \|\| !panel\.mapped \|\| panel\.width <= 0 \|\| panel\.height <= 0/,
-    'the rendered acknowledgement must wait for a real allocation'
-);
-assert.match(
-    source,
-    /const SHUTDOWN_COUNTDOWN_SECONDS = 5;[\s\S]*?_startShutdownCountdown\(status\)[\s\S]*?_commitShutdown\(this\._lastGoodStatus\)/,
-    'a visible five-second countdown must precede shutdown commit'
+// GNOME's native power menu must stay untouched: the extension neither reads
+// nor assigns anything on the end-session dialog, nor mentions its protocol.
+assert.ok(
+    !/endSessionDialog|_confirmRebootToBootLoaderMenu|\b_confirm\b/.test(source),
+    'the extension must not touch Main.endSessionDialog or its confirmation handlers'
 );
 assert.ok(
-    source.includes("'System shutdown ready with safe fallbacks'"),
-    'degraded shutdown completion must be distinguishable from failure'
-);
-assert.match(
-    source,
-    /this\._hud\.setShutdownCountdown\(action, seconds\);[\s\S]*?Clutter\.RepaintFlags\.POST_PAINT[\s\S]*?const began = GLib\.get_monotonic_time\(\);[\s\S]*?GLib\.get_monotonic_time\(\) - began/,
-    'the monotonic countdown clock must start only after the initial countdown frame is painted'
-);
-assert.match(
-    source,
-    /prepared\.operation_id !== status\.operationId \|\|\s*prepared\.session_id !== status\.sessionId \|\|\s*prepared\.action !== status\.shutdownAction[\s\S]*?this\._handoffToGnome\(status\)/,
-    'GNOME handoff must require a marker matching operation, session, and action'
-);
-assert.match(
-    source,
-    /_startPreparedPolling\(operationId\)[\s\S]*?GLib\.timeout_add\([\s\S]*?this\._checkPreparedHandoff\(\)/,
-    'prepared-marker handoff must be polled as well as watched for file events'
-);
-assert.match(
-    source,
-    /const PREPARED_POLL_TIMEOUT_MS = 35000;[\s\S]*?elapsedMs >= PREPARED_POLL_TIMEOUT_MS[\s\S]*?this\._requestCancel\(status\)/,
-    'prepared polling must cancel safely instead of holding the modal forever'
-);
-assert.match(
-    source,
-    /const cancelled = status\?\.operationId === operationId &&\s*this\._requestCancel\(status\);\s*if \(cancelled\) \{\s*this\._dismissed = true;/,
-    'a failed cancel write must not hide an operation which remains pending'
-);
-assert.match(
-    source,
-    /_handleNativeHandoffFailure\(status, error\)[\s\S]*?this\._nativeHandoffOperationId = null;[\s\S]*?this\._writeProtocolFile\(this\._cancelFile[\s\S]*?this\._cancelNativeEndSessionOnce\(status\.operationId\)/,
-    'a rejected GNOME handoff must clear bypass state and cancel the exact operation'
-);
-assert.match(
-    source,
-    /_handleNativeHandoffFailure\(status, error\)[\s\S]*?this\._preflightOperationId = null;[\s\S]*?this\._preflightAction = null;[\s\S]*?this\._preflightSignal = null;/,
-    'a rejected GNOME handoff must not block future confirmed shutdowns'
-);
-assert.match(
-    source,
-    /const wasHandedOff = this\._nativeHandoffOperationId === status\.operationId;[\s\S]*?this\._nativeCancelledOperationId = status\.operationId;[\s\S]*?this\._nativeHandoffOperationId = null;/,
-    'repeated terminal status after GNOME cancellation must not emit Canceled twice'
-);
-assert.match(
-    source,
-    /Gio\.FileQueryInfoFlags\.NOFOLLOW_SYMLINKS[\s\S]*?info\.get_file_type\(\) !== Gio\.FileType\.REGULAR/,
-    'a symlink or non-regular prepared marker must never authorize handoff'
+    !/shutdown-request|shutdown-commit|shutdown-prepared|shutdown-cancel|shutdown-hud-rendered/.test(source),
+    'the shutdown request/commit/prepared/cancel/rendered protocol must not exist'
 );
 assert.ok(
-    source.includes("const SHUTDOWN_ORIGINS = new Set(['preflight']);"),
-    'backend-only GNOME shutdown status must not be displayable'
+    !/shutdown|countdown|preflight|handoff/i.test(source),
+    'the extension must not carry any shutdown presentation or transaction code'
 );
 assert.match(
     source,
-    /parsed\.mode === 'shutdown' &&\s*!matchesRequest && !matchesLocalPreflight[\s\S]*?this\._lastGoodStatus = null;/,
-    'shutdown HUD visibility must be bound to the post-confirmation private request'
+    /const parsed = normaliseStatus\(JSON\.parse\(new TextDecoder\(\)\.decode\(bytes\)\)\);\s*\/\/ Documents for any mode other than startup are ignored\.\s*if \(!parsed\)\s*return;/,
+    'a status document for a mode other than startup must be ignored'
 );
 assert.match(
     source,
-    /this\._cancelNativeEndSessionOnce\(status\.operationId\);/,
-    'one HUD cancellation must close the matching GNOME request exactly once'
-);
-assert.ok(
-    !source.includes('NATIVE_CANCEL_MAX_ATTEMPTS'),
-    'bounded retries must not accidentally cancel a later GNOME dialog'
-);
-assert.ok(
-    !source.includes('_cancelNativeEndSessionRetry'),
-    'native cancellation must not leave a retry source that can affect a later dialog'
-);
-assert.ok(
-    !source.includes('SystemActions.getDefault()'),
-    'preflight must not run before the user confirms the native GNOME dialog'
+    /if \(mode !== 'startup'\)\s*return null;/,
+    'only startup status documents may be normalised for presentation'
 );
 assert.match(
     source,
-    /_wrappedBootOptionsConfirm[\s\S]*?this\._confirmBypass = true;[\s\S]*?this\._confirmBypass = false;/,
-    'Boot Options must retain its native non-cancellable semantics'
+    /const eligible = this\._lastGoodStatus\?\.showOnStartup === true \|\| this\._startupReopened;/,
+    'only startup status may make the HUD visible'
 );
-assert.match(
-    source,
-    /_abortActivePreflightOnDisable\(\)[\s\S]*?this\._writeProtocolFile\(this\._cancelFile[\s\S]*?this\._cancelNativeEndSessionOnce\(operationId\)/,
-    'disabling the extension during preflight must cancel backend and GNOME work'
-);
-assert.match(
-    source,
-    /_recoverPendingPreflightRequest\(\)[\s\S]*?\^\[0-9a-f\]\{32\}\$[\s\S]*?request\.session_id !== this\._currentSessionId[\s\S]*?this\._startPreflightWatchdog/,
-    'an extension reload must safely recover only a fresh current-session preflight request'
-);
-// Cancellation ordering and late status are exercised by shutdown-visibility.mjs.
 
-// Progress geometry and allocation diagnostics are exercised with actual
-// Clutter actors by workspace-state/tests/integration/run_hud_headless.py.
+// The headless-Shell harness lives in workspace-state and is updated together
+// with it; it is not evidence about this checkout until it is run against it.
 // Deferred actor cleanup ordering is exercised by enable-lifecycle.mjs.
 
 

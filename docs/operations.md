@@ -38,14 +38,14 @@ Once startup jobs finish without failure, **OK** dismisses the panel. The privat
 dismissal marker binds to that session and start time, so re-enabling the
 extension does not revive completed progress. Locking the screen also dismisses
 completed, non-failing startup; active work and failures are retained. A startup
-failure offers **Show full error log** and **Close**. Ordinary running startup
-has no shutdown Cancel control and never grabs desktop input.
+failure offers **Show full error log** and **Close**. Running startup offers
+**Abort restoration** and **Run in background**, and never grabs desktop input.
 
 **Важливе** (Important) lists active blocker/critical incidents from the configured
 first-party inventory. Expand a row for safe diagnostic details. **Переглянуто**
 (Reviewed) acknowledges it; resolution comes from a later successful backend
 scan. Missing, malformed, incomplete, or stale reports are not evidence of
-health. This tab never appears during shutdown.
+health.
 
 **GC-профілі** (Cleanup profiles) displays the latest success or failure for each
 profile, including disabled profiles. Its report must have a running daemon and
@@ -54,44 +54,11 @@ unavailable. The HUD has no cleanup start/stop controls.
 
 ## Power off and restart
 
-Unlock the desktop before choosing Power Off or Restart. While locked, the
-extension cancels native confirmation (including its automatic countdown) so
-shutdown cannot skip the workspace checkpoint. The HUD and workspace details
-stay hidden on the lock screen. Standalone installations without the coordinator
-retain GNOME's native shutdown behavior.
-
-1. Use GNOME's normal Power Off or Restart action and confirm its native dialog.
-2. If the coordinator is active, the HUD shows checkpoint preparation. It does
-   not intercept the earlier query or begin work merely because a status file
-   says shutdown.
-3. **Cancel shutdown** or Escape withdraws authorization immediately. The modal
-   grab is released even if writing cancellation fails. Backend recovery can
-   remain visible; cancelling does not claim that recovery has completed.
-4. Once preparation is verified, the HUD must paint a ready frame and keep its
-   five-second countdown visible. After its commit, the coordinator closes
-   checkpointed applications while the compositor is still available. It must
-   publish the exact prepared marker before GNOME receives the saved native
-   confirmation.
-
-The HUD waits at most 35 seconds after commit for that marker. This covers the
-coordinator's 30-second application-drain budget and a five-second publication
-margin; expiry cancels handoff instead of treating silence as success. Local
-cancellation remains immediate. If cancellation arrives after application
-closure began, prepared jobs can be recovered, but closed applications are not
-automatically reopened. Unverified recovery remains visible and blocks another
-attempt until it is resolved. See [testing and limits](testing.md).
-
-A failed step stops handoff, releases modal capture, and keeps its report visible
-with **Show full error log**. Use **Close** or Escape to dismiss the report.
-While recovery is still running, the button reads **Hide (recovery continues)**;
-hiding the HUD does not interrupt recovery or permit shutdown. A `degraded` result
-means verified fallback state was retained, with the reason in stage activity.
-It is distinct from failure.
-
-Lock/greeter transitions, hidden or unallocated HUD, expired context, changed
-operation identity, and failed status prevent authorization. GNOME's Boot
-Options restart stays on the native path because it changes bootloader state
-before confirmation. Privileged forced shutdown is outside the UI protocol.
+The HUD does not take part in power off or restart. GNOME's Power Off and
+Restart actions, including their confirmation dialog, run natively and are never
+intercepted, delayed, or cancelled by the extension. A status document whose
+`mode` is not `startup` is ignored. Any shutdown preparation is owned by the
+coordinator, not by this extension.
 
 ## Verify installed and running versions
 
@@ -103,7 +70,7 @@ gdbus call --session --dest org.gnome.Shell \
 ```
 
 `GetState` is read-only. It returns the loaded UUID, metadata version, imported
-build revision, visible/modal state, and cancellation/recovery evidence. A
+build revision, visible state, operation context, and startup abort state. A
 `development` revision reports unknown source identity. Copied files and loaded
 Shell modules can differ until the next login; a successful install is not proof
 of activation. Release bundles stamp `buildInfo.js` with the source revision.
@@ -114,9 +81,6 @@ of activation. Release bundles stamp `buildInfo.js` with the source revision.
 | --- | --- |
 | No startup panel | Confirm the coordinator is running and published a valid current-session status; `show_startup_hud: false`, an existing dismissal, or a completed report older than five minutes can intentionally hide it. |
 | Old appearance after upgrade | Compare running `GetState` build with the installed release; log out and back in to activate changed Wayland modules. |
-| Shutdown says the coordinator must be upgraded | Its report lacks the complete operation context. Upgrade the coordinator and HUD together; legacy telemetry cannot authorize shutdown. |
-| Shutdown preparation fails | Read the failed stage and its error log. The existing checkpoint may have been retained; do not infer success from a terminal progress bar. Retry through GNOME after addressing the cause. |
-| Cancellation remains pending | Authorization is withdrawn, but recovery is not yet proven. Inspect coordinator status; a late ready report cannot re-arm the cancelled operation. |
 | Important/cleanup tab says unavailable | Inspect the corresponding producer. Do not treat an absent heartbeat or incomplete scan as healthy. |
 | A large activity log does not fit | Scroll the job list. The header and action area remain outside that scroll area. Monitor/work-area/scale changes recalculate layout. |
 

@@ -75,21 +75,8 @@ test('startup tab can be clicked; incident details and acknowledgement work', ()
     assert.deepEqual(acknowledged, ['own-bot', 'auth-required']);
 });
 
-test('shutdown has no tabs and never renders Important', () => {
-    const ui = hud('shutdown');
-    ui._selectedTab = 'important';
-    ui._renderAlerts = () => { throw Error('must not render alerts in shutdown'); };
-    ui._renderTabs();
-    ui._renderContent();
-    ui.setAlerts(normalizeAlerts(payload()));
-    assert.equal(ui._tabs.visible, false);
-    assert.equal(ui._tabs.children.length, 0);
-    assert.equal(ui._selectedTab, 'startup');
-    assert.equal(ui.renderedRestore, true);
-});
-
-test('alert file updates do not open HUD, control services or authorize shutdown', () => {
-    const handlers = code.slice(code.indexOf('    _loadAlerts() {'), code.indexOf('    _requestCancel(status) {'));
+test('alert file updates do not open HUD or control services', () => {
+    const handlers = code.slice(code.indexOf('    _loadAlerts() {'), code.indexOf('    _openErrorLog(path) {'));
     assert.doesNotMatch(handlers, /pushModal|\.show\(|systemctl|PowerOff|Reboot|_writeProtocolFile|_showHud/);
     assert.match(handlers, /this\._lastGoodStatus\?\.mode !== 'startup'/);
     assert.match(handlers, /'alerts', 'ack', source, code/);

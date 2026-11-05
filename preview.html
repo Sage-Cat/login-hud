@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Login HUD — shutdown dry run</title>
+<title>Login HUD — startup dry run</title>
 <style>
   :root {
     color-scheme: dark;
@@ -180,19 +180,15 @@
   <div class="desktop-lines"></div>
   <main class="overlay">
     <div class="dry-run">DRY RUN · NO SYSTEM ACTIONS</div>
-    <section class="panel" role="dialog" aria-label="Shutdown monitor preview">
-      <div class="kicker">SYSTEM / SHUTDOWN TELEMETRY</div>
-      <h1>Saving workspace</h1>
-      <div class="elapsed">Elapsed 8s</div>
-      <div class="overall">Power off confirmed: Capturing recoverable session state</div>
-      <div class="progress-label">Overall progress 50%</div>
+    <section class="panel" role="dialog" aria-label="Startup monitor preview">
+      <div class="kicker"></div>
+      <h1></h1>
+      <div class="elapsed"></div>
+      <div class="overall"></div>
+      <div class="progress-label"></div>
       <div class="track"><div class="fill"></div></div>
-      <div class="rows">
-        <div class="row ready"><div class="heading"><span class="icon">✓</span><span class="name">tmux-resurrect checkpoint</span><span class="state">Ready</span></div><div class="message">Completed tmux-resurrect save</div></div>
-        <div class="row running expanded"><div class="heading"><span class="icon">◉</span><span class="name">Desktop and browser checkpoint</span><span class="state">Running</span></div><div class="message">Capturing Alacritty and Chrome workspace state</div><div class="mini-track"><div class="mini-fill"></div></div><div class="details"><div class="detail-title">ACTIVITY LOG</div><div class="log-line">21:42:07 · Desktop and browser checkpoint · running · Reading live window placement</div><div class="log-line">21:42:08 · Desktop and browser checkpoint · running · Saving Chrome window fingerprints</div></div></div>
-        <div class="row"><div class="heading"><span class="icon">›</span><span class="name">Checkpoint integrity</span><span class="state">Pending</span></div><div class="message">Waiting for the managed save worker</div></div>
-      </div>
-      <div class="actions"><span class="esc">Esc also cancels safely</span><button type="button">Cancel shutdown</button></div>
+      <div class="rows"></div>
+      <div class="actions"></div>
     </section>
   </main>
   <script>
@@ -267,8 +263,7 @@
       document.querySelector('#demo-ok').addEventListener('click', closeDemo);
     }
 
-    if (new URLSearchParams(location.search).get('mode') === 'startup') {
-      document.title = 'Login HUD — startup dry run';
+    {
       document.querySelector('.dry-run').textContent = 'LOGIN HUD DRY RUN · NO SYSTEM ACTIONS';
       document.querySelector('.kicker').textContent = 'SESSION / STARTUP TELEMETRY';
       document.querySelector('h1').textContent = 'Restoring workspace';
@@ -311,8 +306,6 @@
         </div>`;
       document.querySelector('.actions').innerHTML = '<span class="esc">Demo control · no commands are executed</span><button id="demo-finish" type="button">Finish sample run</button>';
       document.querySelector('#demo-finish').addEventListener('click', finishStartupDemo);
-    } else {
-      document.querySelector('.actions button').addEventListener('click', closeDemo);
     }
     makeRowsInteractive();
   </script>

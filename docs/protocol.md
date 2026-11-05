@@ -3,7 +3,7 @@
 This is a local per-user integration contract, not a network API. The current
 status schema is version 1. The supported producer is workspace-state; read this
 together with its operation/coordinator documentation before writing a new
-producer. Do not synthesize authorization markers in a live desktop session.
+producer. Do not synthesize control markers in a live desktop session.
 
 ## Locations and publication
 
@@ -15,15 +15,10 @@ status update.
 
 | File | Writer and purpose |
 | --- | --- |
-| `login-hud-status.json` | Coordinator: current startup/shutdown stages and operation evidence. |
+| `login-hud-status.json` | Coordinator: current startup stages and operation evidence. |
 | `alerts.json` | Incident collector: first-party source coverage and active important incidents. |
 | `startup-hud-dismissed.json` | HUD: dismissal bound to session and startup time; `background` keeps restoration running. |
 | `startup-abort.json` | HUD: request to stop the exact current startup restoration. |
-| `shutdown-request.json` | HUD: request after final native confirmation; exact session, operation, and action. |
-| `shutdown-hud-rendered.json` | HUD: current completed status was allocated and painted. |
-| `shutdown-commit.json` | HUD: visible countdown completed for this operation. |
-| `shutdown-cancel.json` | HUD: operation authorization withdrawn; recovery may still be pending. |
-| `shutdown-prepared.json` | Coordinator: exact operation is prepared for native handoff. |
 
 Cleanup status is separate:
 `${XDG_STATE_HOME:-$HOME/.local/state}/gc-profiled/status.json`.
@@ -33,7 +28,10 @@ Cleanup status is separate:
 Required fields are `schema_version: 1`, `session_id`, `started_at`, `updated_at`,
 `overall_state`, `overall_message`, `stages`, and `error_log_path`. Timestamps are
 ISO 8601 strings. `mode` defaults to `startup`; `show_startup_hud` defaults to
-true. The report must match the current GNOME Session Manager-derived session
+true. The HUD presents only startup status: a document with any other `mode`
+is ignored, so nothing is shown and nothing is written. The HUD takes no part
+in power off or restart and neither writes nor reads any shutdown marker. The
+report must match the current GNOME Session Manager-derived session
 identity, not merely a recently written timestamp.
 
 This structural example is deliberately synthetic; it cannot authorize a live
@@ -69,7 +67,8 @@ session:
 A stage requires `id`, `state`, and `message`; `label` or `name` supplies its
 heading. Supported states are `pending`, `waiting`, `running`, `ready`,
 `degraded`, `failed`, and `skipped`. The last four are terminal. A `degraded`
-shutdown represents verified safe fallbacks, while `failed` blocks handoff.
+stage represents verified safe fallbacks; `failed` marks a stage that did not
+complete.
 
 Numeric `current`/`total` or `fraction` supplies clamped 0–1 progress. Unknown
 nonterminal progress is indeterminate. Terminal stages without explicit progress
@@ -78,14 +77,11 @@ Stages sharing `group_id` form one job named by `group_label`, with averaged
 progress and merged activity. The HUD accepts at most 64 stages and the last 32
 events per stage. Event fields are `at`, `state`, and `message`.
 
-## Shutdown identity and evidence
+## Operation identity
 
-Shutdown adds `operation_id`, `shutdown_action` (`poweroff` or `restart`),
-`shutdown_origin: "preflight"`, and `cancelled`. Reports can include backend
-`operation_state`; it does not replace the HUD's independent authorization
-checks. A shutdown report must match the request or locally retained native
-confirmation. A failed/cancelled report can remain visible without authorizing
-anything.
+Startup status adds `operation_id`, `operation_state`, and `cancelled`.
+`operation_state` is backend lifecycle evidence; it does not replace the HUD's
+independent checks.
 
 `operation_context` contains exactly these six fields:
 
@@ -93,29 +89,13 @@ anything.
 | --- | --- |
 | `boot_id` | Current kernel boot identity. |
 | `login_generation` | Exact current login identity. |
-| `operation_id` | Same operation as the surrounding shutdown report. |
-| `mode` | `shutdown`. |
+| `operation_id` | Same operation as the surrounding startup report. |
+| `mode` | `startup`. |
 | `attempt` | Positive integer attempt number. |
 | `deadline` | Positive finite absolute monotonic seconds for this boot. |
 
-The context is immutable. Regressing an attempt or changing fields within the
-same attempt is rejected. Expiry, old boot/login identity, cancellation, and
-missing context cannot authorize handoff. Legacy reports can be displayed, but
-require a coordinator upgrade before shutdown authorization.
-
-Rendered, commit, cancellation, and prepared evidence echo the exact context.
-Prepared evidence also matches `schema_version`, `session_id`, `operation_id`,
-and action. The native confirmation is invoked only after current completed
-status, visible allocated HUD, paint acknowledgement, countdown, commit, and
-prepared proof all agree. A terminal percentage or a stale ready file is
-insufficient.
-
-The prepared-marker wait starts after commit and is bounded to 35 seconds. The
-coordinator reserves at most 30 seconds for application shutdown before Shell
-teardown, leaving five seconds for handoff publication. The initial wait for
-preflight status is separate and remains 15 seconds. Timeout or local
-cancellation withdraws authorization; neither permits native handoff without
-the matching prepared evidence.
+The context is immutable. Expiry, old boot/login identity, and missing context
+make abort unavailable. Reports without a context can still be displayed.
 
 ## Independent reports
 
@@ -132,8 +112,8 @@ and `profiles`. Each profile has a name, enabled flag, state, message, and
 nullable last-start/finish/success/failure/next-run timestamps. States are
 `pending`, `running`, `ok`, `failed`, and `disabled`. The HUD limits input to
 2 MiB and 256 profiles and requires a fresh running heartbeat for availability.
-These reports are consumed only for startup presentation and cannot authorize
-shutdown, reopen a hidden HUD, or enable cleanup.
+These reports are consumed only for startup presentation and cannot reopen a
+hidden HUD or enable cleanup.
 
 
 ## Startup controls
@@ -150,14 +130,14 @@ operation states are terminal. Legacy reports without that lifecycle state use
 the overall state.
 The HUD displays a pending request until backend status confirms the result;
 a failed receipt write leaves restoration active and permits a retry. This file
-has no shutdown or native power-off authority.
+has no authority over power off or restart.
 
 Run in background hides the startup HUD and records dismissal reason
 `background`; the backend continues. The accessible top-bar **Workspace
 restoration status** button reopens the current startup report. It deletes only
 a dismissal matching the report's session and startup time, and never starts a
 new operation. Completed or cancelled reports can also be reopened. Reopening
-is unavailable at the lock/greeter boundary and during shutdown.
+is unavailable at the lock/greeter boundary.
 
 The same action is exposed as the boolean-returning D-Bus method
 `org.sagecat.LoginHud.ShowStartupStatus` at `/org/sagecat/LoginHud` on the Shell's

@@ -1,9 +1,8 @@
 # Testing and validation
 
-Tests cover three different boundaries: JavaScript behavior, a real isolated
-GNOME Shell, and a complete disposable VM shutdown and subsequent login.
-Each layer has its own evidence; a mocked callback or synthetic status file
-does not prove that an operating system powered off.
+Tests cover two different boundaries: JavaScript behavior and a real isolated
+GNOME Shell. Each layer has its own evidence; a synthetic status file does not
+prove that a real login was restored.
 
 ## Unit checks and packaging
 
@@ -22,42 +21,12 @@ builds the extension ZIP, verifies its exact six-file inventory and metadata,
 and writes its checksum to `dist/`. These commands do not install or activate
 the extension.
 
-The 2026-10-03 validation passed **53 Node tests**, with no failures or skips,
-plus the static checks and package verification. Coverage includes layout,
-passive startup, report validation, enable/disable cleanup, painted countdowns,
-stale operation contexts, cancellation and late callbacks. The handoff timing
-regression confirms that 15, 25, 30 and 34.9 seconds do not prematurely cancel
-the 35-second wait, while expiry at 35 seconds cancels it. Local cancellation
-stops that wait immediately.
-
-An Oct5 real VM cancellation exposed stale presentation: after native stop jobs
-settled, the cancelled report was overwritten by an earlier committed
-"Ready to power off" overlay. New regression tests reproduce that stale commit
-and check failed stages, local cancellation and expired ownership. Progress
-overlays now require a currently ready, authorized operation; terminal reports
-clear matching old markers and render cancellation explicitly. Packaging and
-all **55 Node tests** passed. Final coordinated VM acceptance is recorded in
-[Workspace State's test report](https://github.com/Sage-Cat/workspace-state/blob/main/docs/testing.md).
-
-A later retry timeout was traced to three backend category stages left pending
-when a sealed checkpoint was reused. The real renderer correctly withheld
-acknowledgement; it needed no layout workaround. Scoped terminal failures now
-report completed backend recovery accurately, including Close/Hide and the
-diagnostic endpoint. Unscoped or still-recovering reports remain conservative.
-The updated package passed **58 Node tests**. The real isolated GNOME suite
-passed **21 cases**, including Cancel → Close → a fresh completed retry with
-fewer rows, and refusal to commit an overall-ready report with a pending row.
-
-Final coordinated QEMU acceptance used HUD
-`afa9f9e4939a805d8e547ce35720902dc02662ae` with Workspace State
-`08ca75b0498506a5962c01ab1a457235e672fdaa`. Ordinary upgrade, retained/degraded
-slow-content restore, early native-stop cancellation/protected retry and a
-following ordinary cold boot all passed. The last three used the same runtime.
-The real retry showed a new 5.062-second countdown and restored the complete
-25-window workload without manual reconstruction. The previous pending-row
-failure remains a failed trial; a rendering workaround did not produce the pass.
-See [the complete matrix and limits](https://github.com/Sage-Cat/workspace-state/blob/main/docs/testing.md#final-coordinated-vm-acceptance).
-The working desktop was not rebooted; its next-login result is separate.
+Coverage includes layout, passive startup, report validation, enable/disable
+cleanup, startup controls, and the rules that a status document for a mode other
+than startup is ignored and that the extension never touches GNOME's end-session
+dialog or mentions any shutdown marker. Version 19 removed the shutdown
+interface; validation results for earlier releases that coordinated shutdown
+are in the repository history.
 
 ## Isolated GNOME Shell
 
@@ -71,55 +40,18 @@ python3 tests/integration/run_hud_headless.py --run --output /tmp/hud-test
 
 See the [integration prerequisites and isolation contract](https://github.com/Sage-Cat/workspace-state/blob/main/tests/integration/README.md).
 The harness starts GNOME Shell 46 on its own session bus, Wayland socket and
-temporary XDG directories. It exercises real modal input grabs, lock-screen
-confirmation, failed cancellation writes, backend silence, late ready reports,
-failed-report dismissal, and disable/re-enable races. Native shutdown handoff
-is blocked by the fixture. `results.json` records each check and its result.
-
-The final isolated HUD run passed **17 checks**. This verifies Shell behavior
-without closing or moving windows in the existing desktop session; it does
-not substitute for a real poweroff cycle.
-
-## Genuine VM poweroff and cold boot
-
-On 2026-10-03, the coordinated release passed **three consecutive cycles** in
-a disposable QEMU/KVM Ubuntu guest running GNOME Wayland. Testing used the
-actual GNOME Power Off confirmation, observed the HUD, waited for guest shutdown,
-and then cold-booted into a new Ubuntu graphical login.
-
-| Cycle | Scenario | Observed painted countdown | Chrome exited before Shell teardown |
-| --- | --- | --- | --- |
-| 1 | Normal poweroff and cold boot | 5.054 s | 325 ms |
-| 2 | Three-second HTTP responses, HUD Escape cancellation, then retry | 5.088 s on retry | 145 ms |
-| 3 | Normal poweroff and cold boot | 5.008 s | 104 ms |
-
-Each cycle recorded a guest-initiated QMP shutdown, a clean user-manager stop,
-matching operation-bound render/commit and durable handoff evidence, and a new
-boot identity. The second cycle recorded one cancelled operation and all 42
-HTTP responses taking at least three seconds. A cancelled attempt did not
-authorize the later retry.
-
-After each cold boot, verification matched the independent expected checkpoint,
-browser URLs/order/groups, placement, tmux identities and exact native window
-inventory: 25 windows, including six Alacritty terminals, seven Chrome windows
-with 42 tabs and three groups, four Nemo windows, one VS Code window, one viewer,
-and one each for Slack, Discord, Telegram, Viber, ChatGPT and Remmina. The fixture
-contained ten tmux sessions and 23 synthetic conversation processes. Extra
-unmanaged windows or duplicate restored windows failed verification.
-
-The tested code was [Login HUD f1026fa](https://github.com/Sage-Cat/login-hud/tree/f1026fa520b863e8a87703c138943de482edbdf1)
-with [Workspace State ef24480](https://github.com/Sage-Cat/workspace-state/tree/ef24480e0974442fedb6c100be67c9bfbe84826b).
-For reproduction, use the guarded [VM poweroff harness](https://github.com/Sage-Cat/workspace-state/blob/main/docs/testing.md#real-gnome-power-off-and-browser-adoption)
-and retain its independent expected-state, receipt, journal and QMP evidence.
+temporary XDG directories. It exercises startup presentation and controls
+without closing or moving windows in the existing desktop session. Its
+`results.json` records each check and its result. The harness lives in
+workspace-state and is updated together with it; it is not part of this
+repository's checks, so run it against this checkout before relying on it.
 
 ## Limits
 
-The VM used three virtual displays. These results do not establish physical
-GPU, monitor hotplug or hardware-driver equivalence. Real applications launched
-without account sign-in; authenticated application content, conversation
-recovery, live cloud synchronization and Windows OS hibernation were outside
-this acceptance scope. A separate real Codex CLI launch displayed its signed-out
-screen; the 23 mass-scale conversation workers remained synthetic.
+These results do not establish physical GPU, monitor hotplug or
+hardware-driver equivalence, authenticated application content, conversation
+recovery, or live cloud synchronization. Power off and restart are not covered
+because the HUD takes no part in them.
 
 Raw runtime reports can contain private application data. Keep them outside
 the source tree and redact them before sharing. Screenshots use synthetic data;

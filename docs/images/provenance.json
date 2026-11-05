@@ -29,16 +29,6 @@
       "scene": "gc",
       "file": "gc.png",
       "modal": false
-    },
-    {
-      "scene": "shutdown",
-      "file": "shutdown.png",
-      "modal": true
-    },
-    {
-      "scene": "attention",
-      "file": "attention.png",
-      "modal": false
     }
   ]
 }

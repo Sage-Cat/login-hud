@@ -5,7 +5,7 @@ import GObject from 'gi://GObject';
 import St from 'gi://St';
 import {Spinner} from 'resource:///org/gnome/shell/ui/animation.js';
 import {
-    TERMINAL_STATES, GC_MAX_PROFILES, shutdownRecoveryPending, startupRestorationTerminal, gcViewKey, gcProfilePresentation,
+    TERMINAL_STATES, GC_MAX_PROFILES, startupRestorationTerminal, gcViewKey, gcProfilePresentation,
     gcEventTime, elapsedSince, stateIcon, displayState, eventTime, overallFraction,
     hudBounds,
 } from './reports.js';
@@ -25,14 +25,10 @@ class LoginHud extends St.Widget {
         this._transportNotice = '';
         this._onCloseRequested = null;
         this._onOpenLogRequested = null;
-        this._onCancelRequested = null;
-        this._cancelPending = false;
         this._startupAbortPending = false;
         this._primaryAction = null;
         this._expandedJobs = new Set();
         this._overallProgressFillId = 0;
-        this._shutdownCountdown = null;
-        this._handoffStarted = false;
         this._selectedTab = 'startup';
         this._alerts = null;
         this._alertError = '';
@@ -124,11 +120,10 @@ class LoginHud extends St.Widget {
         this._panel.add_child(this._actions);
     }
 
-    setCallbacks(onCloseRequested, onOpenLogRequested, onCancelRequested, onAlertAckRequested = null,
+    setCallbacks(onCloseRequested, onOpenLogRequested, onAlertAckRequested = null,
         onStartupAbortRequested = null, onBackgroundRequested = null) {
         this._onCloseRequested = onCloseRequested;
         this._onOpenLogRequested = onOpenLogRequested;
-        this._onCancelRequested = onCancelRequested;
         this._onAlertAckRequested = onAlertAckRequested;
         this._onStartupAbortRequested = onStartupAbortRequested;
         this._onBackgroundRequested = onBackgroundRequested;
@@ -137,32 +132,19 @@ class LoginHud extends St.Widget {
     setStatus(status) {
         this._status = status;
         this._transportNotice = '';
-        this._shutdownCountdown = null;
-        this._handoffStarted = false;
-        if (status.cancelled)
-            this._cancelPending = false;
-        const isShutdown = status.mode === 'shutdown';
-        this._kicker.text = isShutdown
-            ? 'SYSTEM / SHUTDOWN TELEMETRY'
-            : 'SESSION / STARTUP TELEMETRY';
-        this._title.text = !isShutdown && (status.cancelled || status.operationState === 'cancelled')
+        this._kicker.text = 'SESSION / STARTUP TELEMETRY';
+        this._title.text = status.cancelled || status.operationState === 'cancelled'
             ? 'Restoration stopped'
-            : isShutdown && status.cancelled
-            ? 'System shutdown cancelled'
             : status.overallState === 'failed'
-            ? isShutdown ? 'System shutdown needs attention' : 'Session startup needs attention'
+            ? 'Session startup needs attention'
             : status.overallState === 'degraded'
-                ? isShutdown
-                    ? 'System shutdown ready with safe fallbacks'
-                    : 'Session systems ready with safe fallbacks'
+                ? 'Session systems ready with safe fallbacks'
             : TERMINAL_STATES.has(status.overallState)
-                ? isShutdown ? 'System shutdown complete' : 'Session systems ready'
-                : isShutdown ? 'Deinitializing system' : 'Restoring workspace';
-        this._overall.text = isShutdown
-            ? `System shutdown: ${status.overallMessage}`
-            : status.cancelled || status.operationState === 'cancelled'
-                ? 'Restoration stopped. Applications already opened are preserved; remaining restoration work was cancelled.'
-                : status.overallMessage;
+                ? 'Session systems ready'
+                : 'Restoring workspace';
+        this._overall.text = status.cancelled || status.operationState === 'cancelled'
+            ? 'Restoration stopped. Applications already opened are preserved; remaining restoration work was cancelled.'
+            : status.overallMessage;
         this._overallProgress = overallFraction(status.stages);
         this._overallProgressLabel.text = `Overall progress ${Math.round(this._overallProgress * 100)}%`;
         this.scheduleProgressFill();
@@ -178,47 +160,8 @@ class LoginHud extends St.Widget {
         this._renderNotice();
     }
 
-    setCancellationPending(pending) {
-        this._cancelPending = pending;
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
     setStartupAbortPending(pending) {
         this._startupAbortPending = pending;
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
-    setShutdownCountdown(action, seconds) {
-        this._shutdownCountdown = {action, seconds};
-        const verb = action === 'restart'
-            ? 'Restarting'
-            : action === 'poweroff' ? 'Powering off' : 'Completing shutdown';
-        this._title.text = action === 'restart'
-            ? 'Ready to restart'
-            : action === 'poweroff' ? 'Ready to power off' : 'Ready for shutdown';
-        this._overall.text = `${verb} in ${seconds}…`;
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
-    setHandoffStarted(action) {
-        this._shutdownCountdown = null;
-        this._handoffStarted = true;
-        this._overall.text = action === 'restart'
-            ? 'Handing control to GNOME for restart…'
-            : action === 'poweroff'
-                ? 'Handing control to GNOME for power off…'
-                : 'Handing control back to GNOME…';
-        if (this._status)
-            this._renderActions(this._status);
-    }
-
-    setAwaitingPrepared(action) {
-        this._shutdownCountdown = null;
-        this._title.text = action === 'restart' ? 'Ready to restart' : 'Ready to power off';
-        this._overall.text = 'Preparation complete · verifying final safety marker…';
         if (this._status)
             this._renderActions(this._status);
     }
@@ -482,9 +425,7 @@ class LoginHud extends St.Widget {
         if (stages.length === 0) {
             this._rows.add_child(new St.Label({
                 style_class: 'login-hud-empty',
-                text: this._status?.mode === 'shutdown'
-                    ? 'No shutdown stages have been published yet.'
-                    : 'No startup stages have been published yet.',
+                text: 'No startup stages have been published yet.',
             }));
             return;
         }
@@ -670,7 +611,6 @@ class LoginHud extends St.Widget {
         this._actions.destroy_all_children();
         this._primaryAction = null;
         const hasFailure = status.overallState === 'failed' || status.stages.some(stage => stage.state === 'failed');
-        const allTerminal = status.stages.length > 0 && status.stages.every(stage => TERMINAL_STATES.has(stage.state));
 
         if (status.mode === 'startup') {
             const terminal = startupRestorationTerminal(status);
@@ -710,42 +650,10 @@ class LoginHud extends St.Widget {
                 reactive: true,
             });
             button._loginHudAction = 'error-log';
-            button.connect('clicked', () => this._onOpenLogRequested?.(
-                status.mode === 'startup' ? this._status.errorLogPath : status.errorLogPath));
+            button.connect('clicked', () => this._onOpenLogRequested?.(status.errorLogPath));
             this._actions.add_child(button);
             this._primaryAction = button;
-            if (status.mode === 'shutdown') {
-                this._actions.add_child(new St.Label({
-                    style_class: 'login-hud-action-status',
-                    text: 'Shutdown stopped · review the error and retry power off',
-                }));
-            }
-            this._addCloseButton(status.mode === 'shutdown' && shutdownRecoveryPending(status)
-                ? 'Hide (recovery continues)' : 'Close');
-        } else if (status.mode === 'shutdown' && this._handoffStarted) {
-            this._actions.add_child(new St.Label({
-                style_class: 'login-hud-action-status',
-                text: 'Shutdown handoff in progress',
-            }));
-        } else if (status.mode === 'shutdown' && !status.cancelled) {
-            const button = new St.Button({
-                style_class: 'login-hud-button login-hud-button-cancel',
-                label: this._cancelPending
-                    ? 'Cancelling safely…'
-                    : this._shutdownCountdown
-                        ? `Cancel (${this._shutdownCountdown.seconds}s)`
-                        : 'Cancel shutdown',
-                can_focus: true,
-                reactive: !this._cancelPending,
-            });
-            button._loginHudAction = 'shutdown-cancel';
-            button.connect('clicked', () => this._onCancelRequested?.(status));
-            this._actions.add_child(button);
-            this._primaryAction = button;
-        } else if (status.mode === 'shutdown' && status.cancelled) {
-            this._addCloseButton(shutdownRecoveryPending(status) ? 'Hide (recovery continues)' : 'Close');
-        } else if (allTerminal && status.mode !== 'shutdown') {
-            this._addCloseButton('OK', true);
+            this._addCloseButton('Close');
         }
     }
 

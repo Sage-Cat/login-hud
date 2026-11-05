@@ -31,9 +31,6 @@ export default class DocumentationFixture extends Extension {
         if (request.action === 'setup') {
             Main.overview.hide();
             extension._currentSessionId = SESSION;
-            extension._originalEndSessionConfirm = () => {
-                throw new Error('Native shutdown is forbidden in documentation capture');
-            };
             // Controls are never clicked; also remove all external launch callbacks.
             extension._openErrorLog = () => {};
             extension._ackAlert = () => {};
@@ -41,16 +38,7 @@ export default class DocumentationFixture extends Extension {
             const now = new Date().toISOString();
             const earlier = new Date(Date.now() - 120000).toISOString();
             const directory = extension._statusDirectory.get_path();
-            const shutdown = request.scene === 'shutdown' || request.scene === 'attention';
-            const failed = request.scene === 'attention';
-            const operation = failed ? 'd0c00000000000000000000000000002' : 'd0c00000000000000000000000000001';
-            const stages = shutdown ? [
-                ['terminals', 'Terminal checkpoint', 'ready', 'Window and pane layout saved', 1],
-                ['workspace-save', 'Desktop and browser checkpoint', failed ? 'failed' : 'running',
-                    failed ? 'Browser verification needs attention; the previous checkpoint is preserved' : 'Verifying browser tabs and window placement', .65],
-                ['profiles', 'Pre-shutdown profiles', 'waiting', 'Waiting for the checkpoint', 0],
-                ['integrity', 'Checkpoint integrity', 'pending', 'Compare saved identities before final handoff', 0],
-            ] : [
+            const stages = [
                 ['shell', 'GNOME and displays', 'ready', 'Display layout and workspaces are ready', 1],
                 ['terminals', 'Terminals and pane layout', 'ready', '3 terminal windows restored', 1],
                 ['browsers', 'Browser windows', 'running', 'Verified 2 of 3 browser windows', 2 / 3],
@@ -59,31 +47,15 @@ export default class DocumentationFixture extends Extension {
                 ['drives', 'Cloud drives', 'pending', 'Starts after workspace restoration', null],
             ];
             const status = {
-                schema_version: 1, mode: shutdown ? 'shutdown' : 'startup',
+                schema_version: 1, mode: 'startup',
                 session_id: SESSION, show_startup_hud: true,
                 started_at: new Date(Date.now() - 24000).toISOString(), updated_at: now,
-                overall_state: failed ? 'failed' : 'running',
-                overall_message: failed ? 'Preparation stopped safely; review the failed step'
-                    : shutdown ? 'Saving a verified workspace before power off' : 'Your workspace is being restored',
+                overall_state: 'running', overall_message: 'Your workspace is being restored',
                 error_log_path: GLib.build_filenamev([directory, 'synthetic-example.txt']),
                 stages: stages.map(([id, label, state, message, fraction]) => ({id, label, state, message, fraction,
                     events: [{at: earlier, state: 'running', message: 'Read the saved window recipe'},
                         {at: now, state, message}]})),
             };
-            if (shutdown) {
-                extension._preflightOperationId = operation;
-                extension._preflightAction = 'poweroff';
-                extension._preflightSignal = 'ConfirmedShutdown';
-                Object.assign(status, {operation_id: operation, cancelled: false,
-                    shutdown_action: 'poweroff', shutdown_origin: 'preflight',
-                    operation_state: failed ? 'failed' : 'preparing',
-                    operation_context: {boot_id: extension._bootId, login_generation: SESSION,
-                        operation_id: operation, mode: 'shutdown', attempt: 1,
-                        deadline: GLib.get_monotonic_time() / 1000000 + 120}});
-                extension._writeProtocolFile(extension._requestFile, 'docs-request', {
-                    schema_version: 1, operation_id: operation, session_id: SESSION,
-                    action: 'poweroff', requested_at: now});
-            }
             const alerts = {schema_version: 1, boot_id: 'synthetic-boot', last_scan_boot_id: 'synthetic-boot',
                 last_scan_at: now, scanning: false, sources: [
                     {id: 'drive-sync', label: 'Shared folder sync', host: 'local', ownership: 'first-party', source_ref: 'example sync service'},
@@ -162,6 +134,6 @@ export default class DocumentationFixture extends Extension {
         }
         return {ready: !Main.layoutManager._startingUp, overview: Main.overview.visible,
             visible: Boolean(panel?.visible), mapped: Boolean(panel?.mapped),
-            modal: Boolean(extension._modalGrab), scene: this._scene, capture: this._capture};
+            scene: this._scene, capture: this._capture};
     }
 }

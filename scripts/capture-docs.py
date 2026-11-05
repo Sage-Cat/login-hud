@@ -18,8 +18,7 @@ import time
 HUD = 'login-hud-docs@example.invalid'
 FIXTURE = 'hud-documentation@example.invalid'
 SCENES = [('startup', 'startup', None), ('details', 'startup', 'browsers'),
-          ('alerts', 'important', 'alert:drive-sync:auth-required'), ('gc', 'gc', None),
-          ('shutdown', 'startup', None), ('attention', 'startup', 'workspace-save')]
+          ('alerts', 'important', 'alert:drive-sync:auth-required'), ('gc', 'gc', None)]
 
 
 def stop(process):
@@ -77,11 +76,8 @@ def inside(root, output):
                 status = until(lambda state: (state.get('capture') or {}).get('done'))
                 if status['capture'].get('error'):
                     raise RuntimeError(status['capture']['error'])
-                expected_modal = scene == 'shutdown'
-                if status['modal'] != expected_modal:
-                    raise RuntimeError(f'{scene}: unexpected modal state')
                 shutil.copyfile(target, output / target.name)
-                captured.append({'scene': scene, 'file': target.name, 'modal': status['modal']})
+                captured.append({'scene': scene, 'file': target.name})
             (output / 'capture-scenes.json').write_text(json.dumps(captured, indent=2) + '\n')
         except Exception:
             print((root / 'shell.log').read_text()[-7000:], file=sys.stderr)

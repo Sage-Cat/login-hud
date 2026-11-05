@@ -15,9 +15,8 @@ make release-artifacts
 Before submitting a change:
 
 - keep startup behavior non-modal;
-- preserve native GNOME shutdown when the coordinator is unavailable;
-- keep every shutdown marker bound to the operation and GNOME session;
-- retain cancellation until the final GNOME handoff;
+- never intercept, delay, or cancel GNOME's native power off or restart;
+- keep every startup marker bound to the operation and GNOME session;
 - never add cloud-drive, GPU, or operating-system teardown to the extension;
 - add or update a lifecycle assertion for safety-sensitive behavior.
 

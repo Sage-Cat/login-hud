@@ -1,11 +1,12 @@
 # Login HUD
 
-A GNOME Shell 46 overlay showing desktop restoration and shutdown preparation.
+A GNOME Shell 46 overlay showing desktop restoration progress after login.
 [Workspace State](https://github.com/Sage-Cat/workspace-state) supplies the progress.
 
-Expand jobs for progress, review application problems and cleanup reports, or
-cancel shutdown preparation. Startup never grabs keyboard or pointer input;
-shutdown requires a visible countdown and verified coordinator handoff.
+Expand jobs for progress, review application problems and cleanup reports,
+abort restoration, or run it in the background. The HUD never grabs keyboard or
+pointer input and takes no part in power off or restart: GNOME's native
+Power Off and Restart actions run unchanged.
 
 ## Install
 

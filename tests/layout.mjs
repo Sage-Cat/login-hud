@@ -7,7 +7,7 @@ import test from 'node:test';
 const source = await loadSource();
 const css = await readFile(new URL('../stylesheet.css', import.meta.url), 'utf8');
 // Exercise the actual layout methods without starting a Shell, reading status,
-// acquiring a grab or sending any desktop/shutdown request.
+// acquiring a grab or sending any desktop request.
 const {hudBounds, LoginHud} = runInNewContext(
     source +
         '\n;({hudBounds, LoginHud});',

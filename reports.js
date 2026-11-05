@@ -4,33 +4,14 @@ const STATUS_FILENAME = 'login-hud-status.json';
 const ALERTS_FILENAME = 'alerts.json';
 const GC_STATUS_FILENAME = 'status.json';
 const DISMISSED_FILENAME = 'startup-hud-dismissed.json';
-const CANCEL_FILENAME = 'shutdown-cancel.json';
-const REQUEST_FILENAME = 'shutdown-request.json';
-const RENDERED_FILENAME = 'shutdown-hud-rendered.json';
-const COMMIT_FILENAME = 'shutdown-commit.json';
-const PREPARED_FILENAME = 'shutdown-prepared.json';
 const SESSION_MANAGER_NAME = 'org.gnome.SessionManager';
-const SHUTDOWN_COORDINATOR_UNIT = 'wsctl-gnome-session.service';
 const DBUS_NAME = 'org.freedesktop.DBus';
 const DBUS_PATH = '/org/freedesktop/DBus';
 const DBUS_INTERFACE = 'org.freedesktop.DBus';
-const SYSTEMD_NAME = 'org.freedesktop.systemd1';
-const SYSTEMD_PATH = '/org/freedesktop/systemd1';
-const SYSTEMD_MANAGER_INTERFACE = 'org.freedesktop.systemd1.Manager';
-const SYSTEMD_UNIT_INTERFACE = 'org.freedesktop.systemd1.Unit';
-const PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties';
 const STATES = new Set([
     'pending', 'waiting', 'running', 'ready', 'degraded', 'failed', 'skipped',
 ]);
 const TERMINAL_STATES = new Set(['ready', 'degraded', 'failed', 'skipped']);
-const MODES = new Set(['startup', 'shutdown']);
-const SHUTDOWN_ACTIONS = new Set(['poweroff', 'restart']);
-const SHUTDOWN_ORIGINS = new Set(['preflight']);
-const SHUTDOWN_COUNTDOWN_SECONDS = 5;
-const PREFLIGHT_STATUS_TIMEOUT_MS = 15000;
-// The coordinator has a 30-second app-drain budget after countdown commit.
-// Keep a bounded margin for publishing its result before cancelling handoff.
-const PREPARED_POLL_TIMEOUT_MS = 35000;
 const STALE_STARTUP_PRESENTATION_MS = 5 * 60 * 1000;
 const GC_STALE_AFTER_MS = 30 * 1000;
 const GC_FUTURE_TOLERANCE_MS = 5 * 1000;
@@ -115,24 +96,6 @@ function groupStages(stages) {
     return jobs;
 }
 
-function shutdownRecoveryPending(status, locallyCancelled = false) {
-    if (status?.mode !== 'shutdown')
-        return false;
-    if (status.recoveryPending === true ||
-        ['cancelling', 'recovering', 'recovery-failed'].includes(status.operationState))
-        return true;
-    // A scoped terminal publication can settle recovery even when untouched
-    // category rows still say pending. A stale prepared report cannot settle
-    // a later local cancellation merely because recovery was previously false.
-    if (status.operationContext && status.recoveryPending === false &&
-        ['completed', 'cancelled', 'failed'].includes(status.operationState))
-        return false;
-    if (locallyCancelled && !status.cancelled)
-        return true;
-    return status.stages.length > 0 &&
-        status.stages.some(stage => !TERMINAL_STATES.has(stage.state));
-}
-
 function startupRestorationTerminal(status) {
     // A category failure does not finish the coordinator's remaining work.
     return status.cancelled || ['completed', 'failed', 'cancelled'].includes(status.operationState) ||
@@ -172,12 +135,15 @@ function normaliseStatus(raw) {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
         throw new Error('The status document must be a JSON object.');
 
+    // Only startup progress is presented. A document for any other mode is
+    // not this HUD's business and is ignored without a notice, whatever its
+    // schema version.
+    const mode = raw.mode ?? 'startup';
+    if (mode !== 'startup')
+        return null;
+
     if (raw.schema_version !== 1)
         throw new Error(`Unsupported status schema version: ${String(raw.schema_version)}.`);
-
-    const mode = raw.mode ?? 'startup';
-    if (!MODES.has(mode))
-        throw new Error(`Unknown HUD mode: ${String(mode)}.`);
 
     const required = [
         'session_id', 'started_at', 'updated_at', 'overall_state', 'overall_message',
@@ -192,16 +158,6 @@ function normaliseStatus(raw) {
     if (!Array.isArray(raw.stages))
         throw new Error('The stages field must be an array.');
     const operationId = text(raw.operation_id) || null;
-    if (mode === 'shutdown' && !operationId)
-        throw new Error('The shutdown status is missing operation_id.');
-    const shutdownAction = mode === 'shutdown' && SHUTDOWN_ACTIONS.has(raw.shutdown_action)
-        ? raw.shutdown_action : null;
-    const shutdownOrigin = mode === 'shutdown' && SHUTDOWN_ORIGINS.has(raw.shutdown_origin)
-        ? raw.shutdown_origin : null;
-    if (mode === 'shutdown' && !shutdownAction)
-        throw new Error(`Unknown shutdown action: ${String(raw.shutdown_action)}.`);
-    if (mode === 'shutdown' && !SHUTDOWN_ORIGINS.has(raw.shutdown_origin))
-        throw new Error(`Unknown shutdown origin: ${String(raw.shutdown_origin)}.`);
 
     const stages = raw.stages.slice(0, 64).map((item, index) => {
         if (item === null || typeof item !== 'object' || Array.isArray(item))
@@ -252,8 +208,7 @@ function normaliseStatus(raw) {
         startedAt: text(raw.started_at),
         updatedAt: text(raw.updated_at),
         overallState: raw.overall_state,
-        overallMessage: text(raw.overall_message,
-            mode === 'shutdown' ? 'Saving your workspace…' : 'Preparing your session…'),
+        overallMessage: text(raw.overall_message, 'Preparing your session…'),
         errorLogPath: typeof raw.error_log_path === 'string' && raw.error_log_path.startsWith('/')
             ? raw.error_log_path : null,
         stages: jobs,
@@ -261,11 +216,6 @@ function normaliseStatus(raw) {
         operationId,
         operationContext: operationContext(raw.operation_context, mode, operationId),
         operationState: text(raw.operation_state) || null,
-        recoveryPending: typeof raw.recovery_pending === 'boolean' ? raw.recovery_pending : null,
-        shutdownAction,
-        shutdownOrigin,
-        shutdownActionExplicit: raw.shutdown_action !== undefined,
-        shutdownOriginExplicit: raw.shutdown_origin !== undefined,
         cancelled: raw.cancelled === true,
         showOnStartup: raw.show_startup_hud !== false,
     };
@@ -457,16 +407,11 @@ function hudBounds(workArea, scaleFactor) {
 
 export {
     STATUS_DIRECTORY, STATUS_FILENAME, ALERTS_FILENAME, GC_STATUS_FILENAME,
-    DISMISSED_FILENAME, CANCEL_FILENAME, REQUEST_FILENAME, RENDERED_FILENAME,
-    COMMIT_FILENAME, PREPARED_FILENAME, SESSION_MANAGER_NAME,
-    SHUTDOWN_COORDINATOR_UNIT, DBUS_NAME, DBUS_PATH, DBUS_INTERFACE, SYSTEMD_NAME,
-    SYSTEMD_PATH, SYSTEMD_MANAGER_INTERFACE, SYSTEMD_UNIT_INTERFACE,
-    PROPERTIES_INTERFACE, STATES, TERMINAL_STATES, MODES, SHUTDOWN_ACTIONS,
-    SHUTDOWN_ORIGINS, SHUTDOWN_COUNTDOWN_SECONDS, PREFLIGHT_STATUS_TIMEOUT_MS,
-    PREPARED_POLL_TIMEOUT_MS, STALE_STARTUP_PRESENTATION_MS, GC_STALE_AFTER_MS,
+    DISMISSED_FILENAME, SESSION_MANAGER_NAME, DBUS_NAME, DBUS_PATH, DBUS_INTERFACE,
+    STATES, TERMINAL_STATES, STALE_STARTUP_PRESENTATION_MS, GC_STALE_AFTER_MS,
     GC_FUTURE_TOLERANCE_MS, GC_MAX_STATUS_BYTES, GC_MAX_PROFILES, GC_STATES,
     text, fraction, stageProgress, aggregateState, groupStages,
-    shutdownRecoveryPending, startupRestorationTerminal, operationContext, sameOperationContext, gcViewKey,
+    startupRestorationTerminal, operationContext, sameOperationContext, gcViewKey,
     normaliseStatus, elapsedSince, displayState, eventTime, stateIcon,
     overallFraction, normalizeAlerts, safeGcName, gcTimestamp,
     normalizeGcProfiles, gcProfilePresentation, gcEventTime, hudBounds,
