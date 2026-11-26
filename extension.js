@@ -8,6 +8,7 @@ import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {BUILD_REVISION} from './buildInfo.js';
 import {LoginHud} from './hudView.js';
@@ -17,6 +18,7 @@ import {
     TERMINAL_STATES, GC_MAX_STATUS_BYTES, STALE_STARTUP_PRESENTATION_MS,
     normaliseStatus, normalizeAlerts, normalizeGcProfiles,
     startupRestorationTerminal, sameOperationContext,
+    normalizeWorkspaceList, workspaceMessage,
 } from './reports.js';
 
 export default class LoginHudExtension extends Extension {
@@ -127,7 +129,11 @@ export default class LoginHudExtension extends Extension {
         });
         this._startupIndicator.visible = false;
         Main.panel.addToStatusArea('workspace-restoration', this._startupIndicator);
+        this._workspaceSwitches = new WorkspaceSwitchMenu();
+        this._workspaceSwitches.install();
+        this._syncWorkspaceMenuVisibility();
         this._sessionModeUpdatedId = Main.sessionMode.connect('updated', () => {
+            this._syncWorkspaceMenuVisibility();
             this._syncVisibility();
         });
 
@@ -176,6 +182,8 @@ export default class LoginHudExtension extends Extension {
         this._diagnostics = null;
         this._cleanup(() => this._startupIndicator?.destroy());
         this._startupIndicator = null;
+        this._cleanup(() => this._workspaceSwitches?.destroy());
+        this._workspaceSwitches = null;
         if (this._legacyPassive) {
             this._legacyPassive = false;
             return;
@@ -495,6 +503,10 @@ export default class LoginHudExtension extends Extension {
         }
     }
 
+    _syncWorkspaceMenuVisibility() {
+        this._workspaceSwitches?.setVisible(!Main.sessionMode.isLocked && !Main.sessionMode.isGreeter);
+    }
+
     _scheduleLoad() {
         if (this._reloadTimeout)
             return;
@@ -749,5 +761,196 @@ export default class LoginHudExtension extends Extension {
             this._syncVisibility();
             this._hud?.reportLogLaunchFailure(error.message);
         }
+    }
+}
+
+class WorkspaceSwitchMenu {
+    install() {
+        this._workspaces = [];
+        this._rows = new class extends PopupMenu.PopupMenuSection {
+            itemActivated() {
+                // Keep the menu open while a workspace transition is verified.
+            }
+        }();
+        const scrollView = new St.ScrollView({
+            child: this._rows.box,
+            style_class: 'workspace-switch-list',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+        });
+        this._rows.actor = scrollView;
+        scrollView._delegate = this._rows;
+
+        this._button = new PanelMenu.Button(0, 'Workspaces');
+        this._icon = new St.Icon({icon_name: 'view-grid-symbolic', style_class: 'system-status-icon'});
+        this._button.add_child(this._icon);
+        this._notice = this._textItem('Loading workspace states…');
+        this._button.menu.addMenuItem(this._notice);
+        this._button.menu.addMenuItem(this._rows);
+        this._button.menu.connect('open-state-changed', (_menu, open) => {
+            if (open)
+                this._refresh();
+            else
+                this._clearPoll();
+        });
+        this._listCancellable = new Gio.Cancellable();
+        Main.panel.addToStatusArea('workspace-switches', this._button);
+    }
+
+    setVisible(visible) {
+        this._button.visible = visible;
+    }
+
+    destroy() {
+        this._clearPoll();
+        const button = this._button;
+        this._button = null;
+        this._listCancellable?.cancel();
+        button?.destroy();
+    }
+
+    _textItem(message) {
+        const item = new PopupMenu.PopupMenuItem(message, {
+            reactive: false, can_focus: false, style_class: 'workspace-switch-message',
+        });
+        item.label.clutter_text.line_wrap = true;
+        return item;
+    }
+
+    _setNotice(message, {busy = false, error = false} = {}) {
+        this._notice.label.text = message;
+        this._notice.visible = Boolean(message);
+        this._icon.icon_name = busy ? 'content-loading-symbolic' :
+            error ? 'dialog-warning-symbolic' : 'view-grid-symbolic';
+        this._button.accessible_name = message ? `Workspaces — ${message}` : 'Workspaces';
+    }
+
+    _clearPoll() {
+        if (this._pollId)
+            GLib.Source.remove(this._pollId);
+        this._pollId = 0;
+    }
+
+    _refreshWhileBusy() {
+        if (this._button.menu.isOpen)
+            this._pollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 2, () => {
+                this._pollId = 0;
+                this._refresh();
+                return GLib.SOURCE_REMOVE;
+            });
+    }
+
+    _run(args, timeout, cancellable = null) {
+        return new Promise((resolve, reject) => {
+            const wsctl = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'wsctl']);
+            const process = Gio.Subprocess.new([
+                '/usr/bin/timeout', '--foreground', '--kill-after=5s', timeout,
+                wsctl, 'workspace', ...args,
+            ], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+            process.communicate_utf8_async(null, cancellable, (_source, result) => {
+                try {
+                    const [, stdout, stderr] = process.communicate_utf8_finish(result);
+                    const code = process.get_if_exited() ? process.get_exit_status() : -1;
+                    if (code === 127)
+                        throw new Error('Workspace controls require Workspace State.');
+                    if (code === 124 || code === 137)
+                        throw new Error('Workspace State took too long to respond.');
+                    resolve({stdout, stderr, code});
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+    }
+
+    async _refresh() {
+        if (!this._button?.visible || this._pending)
+            return;
+        this._clearPoll();
+        this._pending = true;
+        // Existing switch values remain visible while a fresh read is in flight.
+        this._rows.setSensitive(false);
+        if (!this._actionError && !this._backendBusy)
+            this._setNotice('Loading workspace states…', {busy: true});
+        let message = this._actionError ?? '';
+        let error = Boolean(message);
+        let busy = false;
+        try {
+            const {stdout, stderr, code} = await this._run(['list', '--json'], '10s', this._listCancellable);
+            if (code !== 0)
+                throw new Error(workspaceMessage(stderr) || 'Workspace State could not list workspaces.');
+            ({workspaces: this._workspaces, busy} = normalizeWorkspaceList(JSON.parse(stdout)));
+            if (busy)
+                message = 'A workspace transition is in progress…';
+            else if (!message && this._workspaces.length === 0)
+                message = 'No named workspaces are configured.';
+        } catch (failure) {
+            this._workspaces = [];
+            message = [message, workspaceMessage(failure.message)].filter(Boolean).join(' ');
+            error = true;
+        }
+        if (!this._button)
+            return;
+        this._backendBusy = busy;
+        this._pending = false;
+        this._renderRows();
+        this._setNotice(message, {busy, error});
+        if (busy)
+            this._refreshWhileBusy();
+    }
+
+    _renderRows() {
+        this._rows.removeAll();
+        for (const workspace of this._workspaces) {
+            const {name, state, detail, target} = workspace;
+            let item;
+            if (state === 'partial') {
+                // Earlier backends can report partial without a retry direction.
+                const action = target === 'off' ? 'Retry turning off' : target === 'on' ?
+                    'Retry turning on' : 'Recover by turning on';
+                item = new PopupMenu.PopupMenuItem(`${name} — Partial · ${action}`, {
+                    style_class: 'workspace-switch-message',
+                });
+                item.label.clutter_text.line_wrap = true;
+                item.connect('activate', () => this._change(workspace, target ?? 'on'));
+            } else {
+                const on = state === 'on';
+                item = new PopupMenu.PopupSwitchMenuItem(name, on, {
+                    style_class: 'workspace-switch-message',
+                });
+                item.label.clutter_text.line_wrap = true;
+                item.connect('toggled', () => {
+                    item.setToggleState(on);
+                    this._change(workspace, on ? 'off' : 'on');
+                });
+            }
+            this._rows.addMenuItem(item);
+            if (detail)
+                this._rows.addMenuItem(this._textItem(detail));
+        }
+        this._rows.setSensitive(!this._backendBusy);
+    }
+
+    async _change(workspace, target) {
+        if (!this._button?.visible || this._pending || this._backendBusy ||
+            !this._workspaces.includes(workspace) || !['on', 'off'].includes(target))
+            return;
+        this._pending = true;
+        this._actionError = '';
+        this._rows.setSensitive(false);
+        const name = workspaceMessage(workspace.name);
+        this._setNotice(`Turning ${target} ${name}…`, {busy: true});
+        try {
+            // An accepted transition belongs to the backend, even if the UI is disabled.
+            const {stderr, code} = await this._run([target, '--', workspace.name], '180s');
+            if (code === 3)
+                this._actionError = `Turning ${target} ${name} was incomplete.`;
+            else if (code !== 0)
+                throw new Error(workspaceMessage(stderr) || 'Workspace State could not complete the transition.');
+        } catch (error) {
+            this._actionError = `Could not turn ${target} ${name}. ${workspaceMessage(error.message)}`;
+        }
+        this._pending = false;
+        this._refresh();
     }
 }

@@ -23,6 +23,28 @@ function text(value, fallback = '') {
     return typeof value === 'string' && value.length > 0 ? value : fallback;
 }
 
+function workspaceMessage(value) {
+    const message = text(value).replace(/[\p{Cc}\p{Cf}\s]+/gu, ' ').trim();
+    return message.length > 240 ? `${message.slice(0, 239)}…` : message;
+}
+
+function normalizeWorkspaceList(value) {
+    if (!Array.isArray(value?.workspaces))
+        throw new Error('Workspace State returned an invalid workspace list.');
+
+    const names = new Set();
+    const workspaces = value.workspaces.map(workspace => {
+        const {name, state, target, detail} = workspace ?? {};
+        if (typeof name !== 'string' || !name.trim() || /[\p{Cc}\p{Bidi_Control}]/u.test(name) ||
+            names.has(name) || !['on', 'off', 'partial'].includes(state) ||
+            (target !== undefined && !['on', 'off'].includes(target)))
+            throw new Error('Workspace State returned an invalid workspace row.');
+        names.add(name);
+        return {name, state, target, detail: workspaceMessage(detail)};
+    });
+    return {workspaces, busy: value.busy === true};
+}
+
 function fraction(value) {
     if (typeof value !== 'number' || !Number.isFinite(value))
         return null;
@@ -415,4 +437,5 @@ export {
     normaliseStatus, elapsedSince, displayState, eventTime, stateIcon,
     overallFraction, normalizeAlerts, safeGcName, gcTimestamp,
     normalizeGcProfiles, gcProfilePresentation, gcEventTime, hudBounds,
+    normalizeWorkspaceList, workspaceMessage,
 };

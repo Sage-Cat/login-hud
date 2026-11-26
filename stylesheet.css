@@ -336,3 +336,11 @@
 .login-hud-button-cancel:focus {
     background-color: rgba(190, 77, 52, 0.88);
 }
+
+.workspace-switch-list {
+    max-height: 24em;
+}
+
+.workspace-switch-message StLabel {
+    max-width: 25em;
+}
