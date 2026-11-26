@@ -23,6 +23,7 @@ is available even when there is no restoration report. Each row controls a
 named workspace. Turn it off to save and close its windows, or turn it on to
 restore them. The controls pause while Workspace State verifies a change.
 
+If a close was interrupted, **Keep … on and restore closed windows** reopens the missing items.
 If the menu reports a partial change, use **Retry turning on** or **Retry turning
 off** on that row. Review the details below the workspace name if the change
 still fails. A standalone Login HUD can display restoration reports. Workspace

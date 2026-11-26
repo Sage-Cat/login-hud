@@ -140,6 +140,7 @@ test('native switch awaits verified state, keeps argv literal and retries interr
     assert.match(f.notice.label.text, /incomplete/);
     assert.match(f.rows.items[0].label.text, /Partial · Retry turning off/);
     assert.equal(f.rows.items[1].label.text, 'A window remains open');
+    assert.match(f.rows.items[2].label.text, /restore closed windows/);
     f.rows.items[0].activate();
     assert.deepEqual(f.requests.at(-1).argv.slice(-3), ['off', '--', name]);
     f.requests.at(-1).reply(0, '', '');

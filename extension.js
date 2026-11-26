@@ -927,6 +927,11 @@ class WorkspaceSwitchMenu {
             this._rows.addMenuItem(item);
             if (detail)
                 this._rows.addMenuItem(this._textItem(detail));
+            if (state === 'partial' && target === 'off') {
+                const resume = new PopupMenu.PopupMenuItem(`Keep ${name} on and restore closed windows`);
+                resume.connect('activate', () => this._change(workspace, 'on'));
+                this._rows.addMenuItem(resume);
+            }
         }
         this._rows.setSensitive(!this._backendBusy);
     }
