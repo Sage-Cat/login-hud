@@ -23,7 +23,7 @@ check:
 	@$(ESLINT) extension.js reports.js hudView.js
 	@shellcheck scripts/*.sh tests/check.sh
 	@node tests/lifecycle-static.mjs
-	@node --test tests/layout.mjs tests/alerts.mjs tests/gc-profiles.mjs tests/enable-lifecycle.mjs tests/startup-controls.mjs
+	@node --test tests/layout.mjs tests/alerts.mjs tests/gc-profiles.mjs tests/enable-lifecycle.mjs tests/startup-controls.mjs tests/workspace-switches.mjs
 	@echo "check: metadata, JavaScript syntax, and ESLint passed"
 
 test: check
